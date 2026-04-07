@@ -6,6 +6,7 @@
 
 """Drone Delivery Environment – HTTP/WebSocket client."""
 
+import requests
 from typing import Dict, Optional, Tuple
 
 try:
@@ -17,7 +18,7 @@ except ImportError:
     _HAS_OPENENV = False
 
 from .models import (
-    DroneAction, DroneObservation,
+    DroneAction, DroneObservation, FlightPhase,
     Position, Velocity, NearbyObstacle,
 )
 
@@ -41,7 +42,9 @@ def _parse_observation(payload: Dict) -> DroneObservation:
             relative_y=o.get("relative_y", 0.0),
             relative_z=o.get("relative_z", 0.0),
             distance=o.get("distance", 0.0),
-            radius=o.get("radius", 1.0),
+            size_x=o.get("size_x", 2.0),
+            size_y=o.get("size_y", 2.0),
+            size_z=o.get("size_z", 10.0),
             obstacle_type=o.get("obstacle_type", "unknown"),
         )
         for o in nearby_raw
@@ -59,15 +62,19 @@ def _parse_observation(payload: Dict) -> DroneObservation:
     return DroneObservation(
         position=_parse_position(obs_data.get("position", {})),
         velocity=_parse_velocity(obs_data.get("velocity", {})),
+        acceleration=_parse_velocity(obs_data.get("acceleration", {})),
+        flight_phase=obs_data.get("flight_phase", FlightPhase.GROUND.value),
+        cruise_altitude=obs_data.get("cruise_altitude", 15.0),
         target_position=_parse_position(obs_data.get("target_position", {})),
         distance_to_target=obs_data.get("distance_to_target", 0.0),
+        horizontal_distance_to_target=obs_data.get("horizontal_distance_to_target", 0.0),
         target_direction=target_direction,
         nearby_obstacles=nearby,
         min_obstacle_distance=obs_data.get("min_obstacle_distance", float("inf")),
         package_delivered=obs_data.get("package_delivered", False),
         collision_occurred=obs_data.get("collision_occurred", False),
         out_of_bounds=obs_data.get("out_of_bounds", False),
-        steps_remaining=obs_data.get("steps_remaining", 500),
+        steps_remaining=obs_data.get("steps_remaining", 2000),
         next_waypoint=next_waypoint,
         path_length=obs_data.get("path_length", 0),
         done=payload.get("done", obs_data.get("done", False)),
@@ -123,9 +130,6 @@ if _HAS_OPENENV:
             )
 
 else:
-    # Minimal requests-based client for environments without openenv
-    import requests
-
     class DroneEnv:                          # type: ignore[no-redef]
         """
         Lightweight HTTP client (no openenv dependency).

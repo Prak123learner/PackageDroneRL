@@ -9,8 +9,22 @@ Data models for the Drone Delivery Environment.
 
 Models the state space of a drone navigating a 3D grid to deliver packages
 while avoiding obstacles.
+
+Flight Phases
+-------------
+  GROUND      – Drone is on the ground, ready to take off
+  LIFTING     – Drone is ascending to cruise altitude
+  CRUISING    – Drone is flying at cruise altitude towards the target
+  DESCENDING  – Drone is descending towards the delivery location
+  LANDED      – Package delivered, episode done
+
+Obstacle Model
+--------------
+  Obstacles are axis-aligned bounding boxes (AABB) with configurable
+  dimensions (size_x, size_y, size_z).  Default footprint is 2×2 metres.
 """
 
+from enum import Enum
 from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field
 
@@ -26,6 +40,18 @@ except ImportError:
         pass
     class Observation(BaseModel):   # type: ignore[no-redef]
         pass
+
+
+# ─────────────────────────────────────────────
+#  Flight phase enum
+# ─────────────────────────────────────────────
+class FlightPhase(str, Enum):
+    """Discrete flight phases for the package-delivery mission."""
+    GROUND     = "GROUND"
+    LIFTING    = "LIFTING"
+    CRUISING   = "CRUISING"
+    DESCENDING = "DESCENDING"
+    LANDED     = "LANDED"
 
 
 # ─────────────────────────────────────────────
@@ -46,10 +72,18 @@ class Velocity(BaseModel):
 
 
 class Obstacle(BaseModel):
-    """A static obstacle in the environment."""
+    """
+    A static axis-aligned bounding-box obstacle in the environment.
+
+    The obstacle is centred at ``position`` with half-extents
+    ``size_x/2``, ``size_y/2``, ``size_z/2`` along each axis.
+    Default footprint is 2×2 metres.
+    """
     id: int = Field(..., description="Unique obstacle identifier")
     position: Position = Field(..., description="Center position of the obstacle")
-    radius: float = Field(default=1.0, description="Collision radius (metres)")
+    size_x: float = Field(default=2.0, description="Extent along X axis (metres)")
+    size_y: float = Field(default=2.0, description="Extent along Y axis (metres)")
+    size_z: float = Field(default=10.0, description="Extent along Z axis (metres)")
     obstacle_type: str = Field(default="building", description="Type of obstacle")
 
 
@@ -60,7 +94,9 @@ class NearbyObstacle(BaseModel):
     relative_y: float
     relative_z: float
     distance: float
-    radius: float
+    size_x: float
+    size_y: float
+    size_z: float
     obstacle_type: str
 
 
@@ -73,6 +109,9 @@ class DroneAction(Action):
 
     Each axis acceleration is clamped to [-max_accel, +max_accel] inside the
     environment so you can send raw network outputs without pre-clipping.
+
+    The agent has full manual control: these accelerations are applied
+    directly to the drone's velocity each timestep.
     """
     ax: float = Field(default=0.0, description="Acceleration along X axis (m/s²)")
     ay: float = Field(default=0.0, description="Acceleration along Y axis (m/s²)")
@@ -87,15 +126,33 @@ class DroneObservation(Observation):
     Full observation returned after every step / reset.
 
     Includes drone kinematics, goal information, nearby hazards,
-    mission status flags, and the current A* waypoint hint.
+    mission status flags, flight phase, and the current A* waypoint hint.
     """
     # ── Drone state ──────────────────────────
     position: Position = Field(..., description="Current drone position")
     velocity: Velocity = Field(..., description="Current drone velocity")
+    acceleration: Velocity = Field(
+        default_factory=Velocity,
+        description="Acceleration applied this step (m/s²)",
+    )
+
+    # ── Flight phase ─────────────────────────
+    flight_phase: str = Field(
+        default=FlightPhase.GROUND.value,
+        description="Current flight phase: GROUND, LIFTING, CRUISING, DESCENDING, LANDED",
+    )
+    cruise_altitude: float = Field(
+        default=15.0,
+        description="Dynamic cruise altitude computed from obstacle heights (m)",
+    )
 
     # ── Goal info ────────────────────────────
     target_position: Position = Field(..., description="Package delivery target")
     distance_to_target: float = Field(..., description="Euclidean distance to target (m)")
+    horizontal_distance_to_target: float = Field(
+        default=0.0,
+        description="Horizontal (XY) distance to target (m)",
+    )
     target_direction: Tuple[float, float, float] = Field(
         ..., description="Unit vector pointing towards the target"
     )
@@ -114,7 +171,7 @@ class DroneObservation(Observation):
     package_delivered: bool = Field(default=False)
     collision_occurred: bool = Field(default=False)
     out_of_bounds: bool = Field(default=False)
-    steps_remaining: int = Field(default=500)
+    steps_remaining: int = Field(default=2000)
 
     # ── Navigation hint ──────────────────────
     next_waypoint: Optional[Position] = Field(

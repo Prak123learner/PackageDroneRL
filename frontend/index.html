@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Drone Delivery – RL Simulator</title>
-  <meta name="description" content="Interactive 3D drone delivery reinforcement-learning environment simulator with real-time physics visualization." />
+  <meta name="description" content="Interactive 3D drone delivery reinforcement-learning environment simulator with flight phases, AABB obstacles, and real-time physics visualization." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -26,7 +26,7 @@
       </div>
       <div>
         <h1>Drone Delivery Simulator</h1>
-        <p class="subtitle">3D Reinforcement Learning Environment</p>
+        <p class="subtitle">3D Reinforcement Learning Environment v2.0</p>
       </div>
     </div>
     <div class="header-right">
@@ -58,15 +58,15 @@
             <div class="xyz-row">
               <div class="xyz-field">
                 <span class="axis-tag x">X</span>
-                <input type="number" id="start-x" value="5" step="1" />
+                <input type="number" id="start-x" value="10" step="1" />
               </div>
               <div class="xyz-field">
                 <span class="axis-tag y">Y</span>
-                <input type="number" id="start-y" value="5" step="1" />
+                <input type="number" id="start-y" value="10" step="1" />
               </div>
               <div class="xyz-field">
                 <span class="axis-tag z">Z</span>
-                <input type="number" id="start-z" value="5" step="1" />
+                <input type="number" id="start-z" value="0" step="1" />
               </div>
             </div>
           </div>
@@ -75,22 +75,22 @@
             <div class="xyz-row">
               <div class="xyz-field">
                 <span class="axis-tag x">X</span>
-                <input type="number" id="end-x" value="45" step="1" />
+                <input type="number" id="end-x" value="180" step="1" />
               </div>
               <div class="xyz-field">
                 <span class="axis-tag y">Y</span>
-                <input type="number" id="end-y" value="45" step="1" />
+                <input type="number" id="end-y" value="180" step="1" />
               </div>
               <div class="xyz-field">
                 <span class="axis-tag z">Z</span>
-                <input type="number" id="end-z" value="10" step="1" />
+                <input type="number" id="end-z" value="0" step="1" />
               </div>
             </div>
           </div>
           <div class="field-group inline-fields">
             <div>
               <label class="field-label">Obstacles</label>
-              <input type="number" id="num-obstacles" value="8" min="0" max="20" />
+              <input type="number" id="num-obstacles" value="15" min="0" max="30" />
             </div>
             <div>
               <label class="field-label">Seed</label>
@@ -131,7 +131,8 @@
           <div class="accel-quick">
             <button class="chip" data-ax="0" data-ay="0" data-az="0" id="btn-zero">Zero</button>
             <button class="chip" data-ax="3" data-ay="3" data-az="1" id="btn-forward">Forward ↗</button>
-            <button class="chip" data-ax="0" data-ay="0" data-az="3" id="btn-up">Up ↑</button>
+            <button class="chip" data-ax="0" data-ay="0" data-az="5" id="btn-liftoff">Lift Off ⬆</button>
+            <button class="chip" data-ax="0" data-ay="0" data-az="-2" id="btn-descend">Descend ⬇</button>
             <button class="chip" data-ax="-2" data-ay="-2" data-az="0" id="btn-brake">Brake ⏹</button>
           </div>
         </div>
@@ -174,13 +175,37 @@
         <div id="viewport-overlay">
           <div class="overlay-top-left">
             <span id="overlay-episode">Episode: —</span>
-            <span id="overlay-step">Step: 0 / 500</span>
+            <span id="overlay-step">Step: 0 / 2000</span>
+            <span id="overlay-phase" class="overlay-phase">Phase: GROUND</span>
           </div>
           <div class="overlay-top-right">
             <span id="overlay-reward">Reward: 0.00</span>
             <span id="overlay-dist">Dist: —</span>
+            <span id="overlay-alt">Alt: —</span>
           </div>
           <div class="overlay-bottom-center" id="overlay-status"></div>
+        </div>
+        <!-- Flight phase indicator -->
+        <div id="flight-phase-bar">
+          <div class="phase-step" data-phase="GROUND" id="phase-ground">
+            <span class="phase-dot"></span><span class="phase-label">Ground</span>
+          </div>
+          <div class="phase-connector"></div>
+          <div class="phase-step" data-phase="LIFTING" id="phase-lifting">
+            <span class="phase-dot"></span><span class="phase-label">Lifting</span>
+          </div>
+          <div class="phase-connector"></div>
+          <div class="phase-step" data-phase="CRUISING" id="phase-cruising">
+            <span class="phase-dot"></span><span class="phase-label">Cruising</span>
+          </div>
+          <div class="phase-connector"></div>
+          <div class="phase-step" data-phase="DESCENDING" id="phase-descending">
+            <span class="phase-dot"></span><span class="phase-label">Descending</span>
+          </div>
+          <div class="phase-connector"></div>
+          <div class="phase-step" data-phase="LANDED" id="phase-landed">
+            <span class="phase-dot"></span><span class="phase-label">Landed</span>
+          </div>
         </div>
         <div id="view-controls">
           <button class="view-btn active" data-view="perspective" id="view-3d">3D</button>
@@ -207,8 +232,20 @@
             <span class="telem-value mono" id="telem-vel">—</span>
           </div>
           <div class="telem-item">
+            <span class="telem-label">Acceleration</span>
+            <span class="telem-value mono" id="telem-accel">—</span>
+          </div>
+          <div class="telem-item">
             <span class="telem-label">Speed</span>
             <span class="telem-value mono" id="telem-speed">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Altitude</span>
+            <span class="telem-value mono" id="telem-alt">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Cruise Alt</span>
+            <span class="telem-value mono" id="telem-cruise-alt">—</span>
           </div>
           <div class="telem-item">
             <span class="telem-label">Target</span>
@@ -217,6 +254,10 @@
           <div class="telem-item">
             <span class="telem-label">Distance</span>
             <span class="telem-value mono" id="telem-dist">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">H. Distance</span>
+            <span class="telem-value mono" id="telem-hdist">—</span>
           </div>
           <div class="telem-item">
             <span class="telem-label">Direction</span>
@@ -246,6 +287,10 @@
             <div class="flag" id="flag-done"><span class="flag-dot"></span>Done</div>
           </div>
           <div class="telem-grid" style="margin-top:12px">
+            <div class="telem-item">
+              <span class="telem-label">Flight Phase</span>
+              <span class="telem-value mono" id="telem-flight-phase">—</span>
+            </div>
             <div class="telem-item">
               <span class="telem-label">Step Reward</span>
               <span class="telem-value mono" id="telem-step-reward">—</span>

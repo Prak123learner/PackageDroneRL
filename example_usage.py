@@ -4,6 +4,13 @@ example_usage.py
 Demonstrates how to interact with the Drone Delivery environment
 both directly (in-process) and via HTTP client.
 
+The drone follows a flight-phase-aware policy:
+  GROUND     → thrust upward to lift off
+  LIFTING    → continue ascending until cruise altitude, start horizontal
+  CRUISING   → follow A* waypoints / target direction, avoid obstacles
+  DESCENDING → descend towards the target landing position
+  LANDED     → done
+
 Run in-process:
     python example_usage.py
 
@@ -12,78 +19,123 @@ Run against a live server (set SERVER_URL env-var):
 """
 
 import argparse
+import json
 import math
-import sys
 import os
+import sys
+import uuid
+
+import requests
+
+from environment import DroneDeliveryEnvironment
+from models import DroneAction, FlightPhase
+
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  In-process usage
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_local_episode(num_steps: int = 200, seed: int = 42):
+def run_local_episode(num_steps: int = 1000, seed: int = 42):
     """Run one episode directly against the Python environment object."""
-    from drone_env.environment import DroneDeliveryEnvironment
-    from drone_env.models import DroneAction
 
-    print("=" * 60)
-    print("LOCAL in-process episode")
-    print("=" * 60)
+    print("=" * 70)
+    print("LOCAL in-process episode  (Flight-Phase Aware)")
+    print("=" * 70)
 
-    env = DroneDeliveryEnvironment(num_obstacles=6, seed=seed)
+    env = DroneDeliveryEnvironment(num_obstacles=12, seed=seed)
     obs = env.reset()
 
-    print(f"Start   : {obs.position}")
-    print(f"Target  : {obs.target_position}")
-    print(f"Distance: {obs.distance_to_target:.2f} m")
-    print(f"A* path : {obs.path_length} waypoints")
+    print(f"Start        : ({obs.position.x:.1f}, {obs.position.y:.1f}, {obs.position.z:.1f})")
+    print(f"Target       : ({obs.target_position.x:.1f}, {obs.target_position.y:.1f}, {obs.target_position.z:.1f})")
+    print(f"Distance     : {obs.distance_to_target:.2f} m")
+    print(f"Cruise Alt   : {obs.cruise_altitude:.1f} m")
+    print(f"Flight Phase : {obs.flight_phase}")
+    print(f"A* path      : {obs.path_length} waypoints")
+    print(f"Obstacles    : {obs.metadata.get('num_obstacles', 0)}")
     print()
 
     total_reward = 0.0
     for step_idx in range(num_steps):
-        # Greedy policy: thrust along target_direction
-        td = obs.target_direction
-        scale = 3.0
+        phase = obs.flight_phase
 
-        # Obstacle avoidance: steer away from nearest obstacle
-        if obs.nearby_obstacles:
-            nearest = obs.nearby_obstacles[0]
-            if nearest.distance < 5.0:
-                rep_x = -nearest.relative_x / (nearest.distance + 1e-6)
-                rep_y = -nearest.relative_y / (nearest.distance + 1e-6)
-                rep_z = -nearest.relative_z / (nearest.distance + 1e-6)
-                strength = max(0, (5.0 - nearest.distance) / 5.0) * 4.0
-                td = (
-                    td[0] + rep_x * strength,
-                    td[1] + rep_y * strength,
-                    td[2] + rep_z * strength,
-                )
-                # re-normalise
-                mag = math.sqrt(td[0]**2 + td[1]**2 + td[2]**2) + 1e-8
-                td = (td[0]/mag, td[1]/mag, td[2]/mag)
+        if phase == FlightPhase.GROUND.value:
+            # ── GROUND: thrust upward to lift off ──
+            ax, ay, az = 0.0, 0.0, 5.0  # full upward thrust
 
-        # Use A* waypoint if available
-        if obs.next_waypoint:
-            wp = obs.next_waypoint
-            dx = wp.x - obs.position.x
-            dy = wp.y - obs.position.y
-            dz = wp.z - obs.position.z
+        elif phase == FlightPhase.LIFTING.value:
+            # ── LIFTING: ascend + start moving towards target ──
+            # Gentle horizontal acceleration towards target while climbing
+            td = obs.target_direction
+            az = 4.0  # strong upward
+            ax = td[0] * 1.0
+            ay = td[1] * 1.0
+
+        elif phase == FlightPhase.CRUISING.value:
+            # ── CRUISING: navigate towards target avoiding obstacles ──
+            td = obs.target_direction
+            scale = 4.0
+
+            # Use A* waypoint if available
+            if obs.next_waypoint:
+                wp = obs.next_waypoint
+                dx = wp.x - obs.position.x
+                dy = wp.y - obs.position.y
+                dz = wp.z - obs.position.z
+                mag = math.sqrt(dx**2 + dy**2 + dz**2) + 1e-8
+                td = (dx/mag, dy/mag, dz/mag)
+
+            ax = td[0] * scale
+            ay = td[1] * scale
+            az = td[2] * scale
+
+            # Obstacle avoidance: repulsive force from nearest obstacle
+            if obs.nearby_obstacles:
+                nearest = obs.nearby_obstacles[0]
+                if nearest.distance < 8.0:
+                    rep_x = -nearest.relative_x / (nearest.distance + 1e-6)
+                    rep_y = -nearest.relative_y / (nearest.distance + 1e-6)
+                    rep_z = -nearest.relative_z / (nearest.distance + 1e-6)
+                    strength = max(0, (8.0 - nearest.distance) / 8.0) * 5.0
+                    ax += rep_x * strength
+                    ay += rep_y * strength
+                    az += rep_z * strength
+
+            # Maintain cruise altitude
+            alt_error = obs.cruise_altitude - obs.position.z
+            az += alt_error * 1.5  # proportional altitude hold
+
+        elif phase == FlightPhase.DESCENDING.value:
+            # ── DESCENDING: move towards target and descend ──
+            dx = obs.target_position.x - obs.position.x
+            dy = obs.target_position.y - obs.position.y
+            dz = obs.target_position.z - obs.position.z
             mag = math.sqrt(dx**2 + dy**2 + dz**2) + 1e-8
-            td = (dx/mag, dy/mag, dz/mag)
+            ax = (dx / mag) * 2.0
+            ay = (dy / mag) * 2.0
+            # Controlled descent
+            az = -2.0 if obs.position.z > 1.0 else -0.5
 
-        action = DroneAction(
-            ax=td[0] * scale,
-            ay=td[1] * scale,
-            az=td[2] * scale,
-        )
+            # Brake horizontally when very close
+            if obs.horizontal_distance_to_target < 2.0:
+                ax = -obs.velocity.vx * 3.0
+                ay = -obs.velocity.vy * 3.0
+        else:
+            ax, ay, az = 0.0, 0.0, 0.0
+
+        action = DroneAction(ax=ax, ay=ay, az=az)
         obs = env.step(action)
         total_reward += obs.reward
 
-        if step_idx % 25 == 0 or obs.done:
+        if step_idx % 50 == 0 or obs.done:
             print(
-                f"Step {step_idx+1:>3} | "
+                f"Step {step_idx+1:>4} | "
+                f"phase={obs.flight_phase:<11} | "
                 f"pos=({obs.position.x:.1f},{obs.position.y:.1f},{obs.position.z:.1f}) | "
-                f"dist={obs.distance_to_target:.2f} m | "
-                f"reward={obs.reward:.2f} | "
+                f"dist={obs.distance_to_target:.1f}m | "
+                f"hdist={obs.horizontal_distance_to_target:.1f}m | "
+                f"alt={obs.position.z:.1f}m | "
                 f"near_obs={len(obs.nearby_obstacles)}"
             )
 
@@ -106,51 +158,89 @@ def run_local_episode(num_steps: int = 200, seed: int = 42):
 #  Remote HTTP usage
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_remote_episode(base_url: str, num_steps: int = 200):
+def run_remote_episode(base_url: str, num_steps: int = 1000):
     """Run one episode against a live server using plain requests."""
-    import requests, json, uuid
+
 
     session_id = str(uuid.uuid4())[:8]
-    print("=" * 60)
+    print("=" * 70)
     print(f"REMOTE episode  →  {base_url}  (session={session_id})")
-    print("=" * 60)
+    print("=" * 70)
 
     params = {"session_id": session_id}
 
     # Reset
     r = requests.post(f"{base_url}/reset", params=params, timeout=10)
     obs = r.json()
-    print(f"Start   : {obs['position']}")
-    print(f"Target  : {obs['target_position']}")
-    print(f"Distance: {obs['distance_to_target']:.2f} m")
+    print(f"Start        : {obs['position']}")
+    print(f"Target       : {obs['target_position']}")
+    print(f"Distance     : {obs['distance_to_target']:.2f} m")
+    print(f"Cruise Alt   : {obs['cruise_altitude']:.1f} m")
+    print(f"Flight Phase : {obs['flight_phase']}")
+    print()
 
     total_reward = 0.0
     for step_idx in range(num_steps):
-        td = obs["target_direction"]
-        scale = 3.0
+        phase = obs["flight_phase"]
 
-        # Waypoint override
-        if obs.get("next_waypoint"):
-            wp = obs["next_waypoint"]
+        if phase == "GROUND":
+            ax, ay, az = 0.0, 0.0, 5.0
+
+        elif phase == "LIFTING":
+            td = obs["target_direction"]
+            ax, ay, az = td[0] * 1.0, td[1] * 1.0, 4.0
+
+        elif phase == "CRUISING":
+            td = obs["target_direction"]
+            scale = 4.0
+
+            if obs.get("next_waypoint"):
+                wp = obs["next_waypoint"]
+                pos = obs["position"]
+                dx = wp["x"] - pos["x"]
+                dy = wp["y"] - pos["y"]
+                dz = wp["z"] - pos["z"]
+                mag = math.sqrt(dx**2 + dy**2 + dz**2) + 1e-8
+                td = [dx/mag, dy/mag, dz/mag]
+
+            ax = td[0] * scale
+            ay = td[1] * scale
+            az = td[2] * scale
+
+            # Altitude hold
+            alt_error = obs["cruise_altitude"] - obs["position"]["z"]
+            az += alt_error * 1.5
+
+        elif phase == "DESCENDING":
             pos = obs["position"]
-            dx = wp["x"] - pos["x"]
-            dy = wp["y"] - pos["y"]
-            dz = wp["z"] - pos["z"]
-            mag = math.sqrt(dx**2 + dy**2 + dz**2) + 1e-8
-            td = [dx/mag, dy/mag, dz/mag]
+            tgt = obs["target_position"]
+            dx = tgt["x"] - pos["x"]
+            dy = tgt["y"] - pos["y"]
+            mag = math.sqrt(dx**2 + dy**2) + 1e-8
+            ax = (dx / mag) * 2.0
+            ay = (dy / mag) * 2.0
+            az = -2.0 if pos["z"] > 1.0 else -0.5
 
-        payload = {"ax": td[0]*scale, "ay": td[1]*scale, "az": td[2]*scale}
+            if obs.get("horizontal_distance_to_target", 999) < 2.0:
+                vel = obs["velocity"]
+                ax = -vel["vx"] * 3.0
+                ay = -vel["vy"] * 3.0
+        else:
+            ax, ay, az = 0.0, 0.0, 0.0
+
+        payload = {"ax": ax, "ay": ay, "az": az}
         r = requests.post(f"{base_url}/step", params=params, json=payload, timeout=10)
         obs = r.json()
         total_reward += obs.get("reward", 0.0)
 
-        if step_idx % 25 == 0 or obs.get("done"):
+        if step_idx % 50 == 0 or obs.get("done"):
             pos = obs["position"]
             print(
-                f"Step {step_idx+1:>3} | "
+                f"Step {step_idx+1:>4} | "
+                f"phase={obs['flight_phase']:<11} | "
                 f"pos=({pos['x']:.1f},{pos['y']:.1f},{pos['z']:.1f}) | "
-                f"dist={obs['distance_to_target']:.2f} m | "
-                f"reward={obs.get('reward',0):.2f}"
+                f"dist={obs['distance_to_target']:.1f}m | "
+                f"hdist={obs.get('horizontal_distance_to_target', 0):.1f}m"
             )
 
         if obs.get("done"):
@@ -177,7 +267,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--remote", action="store_true")
     parser.add_argument("--url", default=os.getenv("SERVER_URL", "http://localhost:8000"))
-    parser.add_argument("--steps", type=int, default=200)
+    parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

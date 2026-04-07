@@ -38,23 +38,30 @@
   const overlayStep    = $('overlay-step');
   const overlayReward  = $('overlay-reward');
   const overlayDist    = $('overlay-dist');
+  const overlayAlt     = $('overlay-alt');
+  const overlayPhase   = $('overlay-phase');
   const overlayStatus  = $('overlay-status');
 
   // Telemetry
-  const telemPos    = $('telem-pos');
-  const telemVel    = $('telem-vel');
-  const telemSpeed  = $('telem-speed');
-  const telemTarget = $('telem-target');
-  const telemDist   = $('telem-dist');
-  const telemDir    = $('telem-dir');
-  const telemWP     = $('telem-wp');
-  const telemPath   = $('telem-path');
+  const telemPos       = $('telem-pos');
+  const telemVel       = $('telem-vel');
+  const telemAccel     = $('telem-accel');
+  const telemSpeed     = $('telem-speed');
+  const telemAlt       = $('telem-alt');
+  const telemCruiseAlt = $('telem-cruise-alt');
+  const telemTarget    = $('telem-target');
+  const telemDist      = $('telem-dist');
+  const telemHDist     = $('telem-hdist');
+  const telemDir       = $('telem-dir');
+  const telemWP        = $('telem-wp');
+  const telemPath      = $('telem-path');
 
   // Status
   const flagDelivered = $('flag-delivered');
   const flagCollision = $('flag-collision');
   const flagOOB       = $('flag-oob');
   const flagDone      = $('flag-done');
+  const telemFlightPhase = $('telem-flight-phase');
   const telemStepReward  = $('telem-step-reward');
   const telemTotalReward = $('telem-total-reward');
   const telemStepsLeft   = $('telem-steps-left');
@@ -66,6 +73,16 @@
   // Reward chart
   const rewardCanvas = $('reward-chart');
 
+  // Flight phase steps
+  const phaseSteps = ['GROUND', 'LIFTING', 'CRUISING', 'DESCENDING', 'LANDED'];
+  const phaseElements = {
+    GROUND:     $('phase-ground'),
+    LIFTING:    $('phase-lifting'),
+    CRUISING:   $('phase-cruising'),
+    DESCENDING: $('phase-descending'),
+    LANDED:     $('phase-landed'),
+  };
+
   // ────────────────────────────────────────────────────────────────────────
   //  State
   // ────────────────────────────────────────────────────────────────────────
@@ -73,7 +90,7 @@
   let autoInterval = null;
   let isRunning = false;
   let currentObs = null;         // latest DroneObservation from API
-  let allObstacles = [];         // full obstacle list (from /state or initial)
+  let allObstacles = [];         // full obstacle list (from /obstacles)
   let rewardHistory = [];
   let totalRewardAcc = 0;
 
@@ -124,6 +141,30 @@
   }
 
   // ────────────────────────────────────────────────────────────────────────
+  //  Update flight phase indicator
+  // ────────────────────────────────────────────────────────────────────────
+  function updateFlightPhaseUI(phase) {
+    const currentIdx = phaseSteps.indexOf(phase);
+
+    for (const [phaseName, el] of Object.entries(phaseElements)) {
+      if (!el) continue;
+      const idx = phaseSteps.indexOf(phaseName);
+      el.classList.remove('active', 'completed');
+      if (idx < currentIdx) {
+        el.classList.add('completed');
+      } else if (idx === currentIdx) {
+        el.classList.add('active');
+      }
+    }
+
+    // Update connectors
+    const connectors = document.querySelectorAll('.phase-connector');
+    connectors.forEach((conn, i) => {
+      conn.classList.toggle('completed', i < currentIdx);
+    });
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
   //  Update UI from observation
   // ────────────────────────────────────────────────────────────────────────
   function updateUI(obs) {
@@ -132,6 +173,10 @@
     // Renderer
     const pos = obs.position || {};
     const vel = obs.velocity || {};
+    const accel = obs.acceleration || {};
+
+    renderer.updateFlightPhase(obs.flight_phase || 'GROUND');
+    renderer.updateCruiseAltitude(obs.cruise_altitude || 15);
     renderer.updateDrone(pos, vel);
     renderer.updateTarget(obs.target_position);
     renderer.updateNearby(obs.nearby_obstacles || []);
@@ -139,9 +184,24 @@
 
     // Overlay HUD
     overlayEpisode.textContent = `Episode: ${(obs.metadata?.episode_id || '—').slice(0, 8)}`;
-    overlayStep.textContent = `Step: ${obs.metadata?.step || 0} / 500`;
+    overlayStep.textContent = `Step: ${obs.metadata?.step || 0} / 2000`;
     overlayReward.textContent = `Reward: ${fmt(obs.metadata?.total_reward)}`;
     overlayDist.textContent = `Dist: ${fmt(obs.distance_to_target, 1)}m`;
+    overlayAlt.textContent = `Alt: ${fmt(pos.z, 1)}m`;
+    overlayPhase.textContent = `Phase: ${obs.flight_phase || 'GROUND'}`;
+
+    // Phase-colored overlay
+    const phaseColorClass = {
+      GROUND: 'phase-ground-color',
+      LIFTING: 'phase-lifting-color',
+      CRUISING: 'phase-cruising-color',
+      DESCENDING: 'phase-descending-color',
+      LANDED: 'phase-landed-color',
+    };
+    overlayPhase.className = 'overlay-phase ' + (phaseColorClass[obs.flight_phase] || '');
+
+    // Flight phase bar
+    updateFlightPhaseUI(obs.flight_phase || 'GROUND');
 
     // Status overlay
     overlayStatus.classList.remove('show', 'delivered', 'collision', 'oob');
@@ -159,10 +219,14 @@
     // Telemetry
     telemPos.textContent = `${fmt(pos.x)}, ${fmt(pos.y)}, ${fmt(pos.z)}`;
     telemVel.textContent = `${fmt(vel.vx)}, ${fmt(vel.vy)}, ${fmt(vel.vz)}`;
+    telemAccel.textContent = `${fmt(accel.vx)}, ${fmt(accel.vy)}, ${fmt(accel.vz)}`;
     telemSpeed.textContent = `${fmt(obs.metadata?.speed)} m/s`;
+    telemAlt.textContent = `${fmt(pos.z, 1)} m`;
+    telemCruiseAlt.textContent = `${fmt(obs.cruise_altitude, 1)} m`;
     const tp = obs.target_position || {};
     telemTarget.textContent = `${fmt(tp.x)}, ${fmt(tp.y)}, ${fmt(tp.z)}`;
     telemDist.textContent = `${fmt(obs.distance_to_target, 1)} m`;
+    telemHDist.textContent = `${fmt(obs.horizontal_distance_to_target, 1)} m`;
     const td = obs.target_direction || [0,0,0];
     telemDir.textContent = `${fmt(td[0])}, ${fmt(td[1])}, ${fmt(td[2])}`;
     const wp = obs.next_waypoint;
@@ -175,12 +239,15 @@
     flagOOB.classList.toggle('active', !!obs.out_of_bounds);
     flagDone.classList.toggle('active', !!obs.done);
 
+    // Flight phase text
+    telemFlightPhase.textContent = obs.flight_phase || '—';
+
     telemStepReward.textContent = fmt(obs.reward);
     telemTotalReward.textContent = fmt(obs.metadata?.total_reward);
     telemStepsLeft.textContent = obs.steps_remaining;
     telemObsCount.textContent = obs.metadata?.num_obstacles || '—';
 
-    // Nearby obstacles panel
+    // Nearby obstacles panel — show box dimensions instead of radius
     const nearby = obs.nearby_obstacles || [];
     if (nearby.length === 0) {
       obsList.innerHTML = '<span class="muted">No obstacles in range</span>';
@@ -188,7 +255,7 @@
       obsList.innerHTML = nearby.map(o => `
         <div class="obs-item">
           <span class="obs-type">${o.obstacle_type}</span>
-          <span class="obs-dist">${fmt(o.distance, 1)}m (r=${fmt(o.radius, 1)})</span>
+          <span class="obs-dist">${fmt(o.distance, 1)}m (${fmt(o.size_x,0)}×${fmt(o.size_y,0)}×${fmt(o.size_z,0)})</span>
         </div>
       `).join('');
     }
@@ -253,7 +320,7 @@
     try {
       const seedVal = seedInput.value.trim();
       const body = {
-        num_obstacles: parseInt(numObsInput.value) || 8,
+        num_obstacles: parseInt(numObsInput.value) || 15,
       };
       if (seedVal !== '') body.seed = parseInt(seedVal);
 
@@ -291,7 +358,7 @@
       };
       const obs = await api('POST', '/step', body);
 
-      // Track obstacles from nearby observations
+      // Track obstacles from nearby observations (AABB version)
       for (const n of (obs.nearby_obstacles || [])) {
         const dronePos = obs.position;
         const absPos = {
@@ -303,13 +370,17 @@
         const existing = allObstacles.find(o => o.id === n.id);
         if (existing) {
           existing.position = absPos;
-          existing.radius = n.radius;
+          existing.size_x = n.size_x;
+          existing.size_y = n.size_y;
+          existing.size_z = n.size_z;
           existing.obstacle_type = n.obstacle_type;
         } else {
           allObstacles.push({
             id: n.id,
             position: absPos,
-            radius: n.radius,
+            size_x: n.size_x,
+            size_y: n.size_y,
+            size_z: n.size_z,
             obstacle_type: n.obstacle_type,
           });
         }
@@ -481,7 +552,7 @@
       checkConnection();
     });
 
-    toast('🚁 Drone Delivery Simulator ready – click Reset to start', 'info', 4000);
+    toast('🚁 Drone Delivery Simulator v2.0 ready – click Reset to start', 'info', 4000);
   }
 
   // Boot

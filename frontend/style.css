@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   Drone Delivery Simulator – Design System
+   Drone Delivery Simulator – Design System v2.0
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Tokens ─────────────────────────────────────────────────────────────── */
@@ -30,6 +30,8 @@
   --rose-glow: rgba(244, 63, 94, 0.3);
   --amber: #f59e0b;
   --amber-glow: rgba(245, 158, 11, 0.3);
+  --violet: #8b5cf6;
+  --violet-glow: rgba(139, 92, 246, 0.3);
 
   /* Gradients */
   --gradient-primary: linear-gradient(135deg, #6366f1, #06b6d4);
@@ -544,9 +546,25 @@ input[type="range"]::-moz-range-thumb {
 }
 .overlay-top-left { top: 14px; left: 14px; }
 .overlay-top-right { top: 14px; right: 14px; text-align: right; }
+
+/* Flight phase in overlay */
+.overlay-phase {
+  font-weight: 700;
+  font-size: 0.78rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-top: 2px;
+}
+.phase-ground-color { color: var(--rose); background: rgba(244, 63, 94, 0.1); }
+.phase-lifting-color { color: var(--violet); background: rgba(139, 92, 246, 0.1); }
+.phase-cruising-color { color: var(--cyan); background: rgba(6, 182, 212, 0.1); }
+.phase-descending-color { color: var(--amber); background: rgba(245, 158, 11, 0.1); }
+.phase-landed-color { color: var(--emerald); background: rgba(16, 185, 129, 0.1); }
+
 .overlay-bottom-center {
   position: absolute;
-  bottom: 14px;
+  bottom: 60px;
   left: 50%;
   transform: translateX(-50%);
   font-size: 0.85rem;
@@ -578,10 +596,105 @@ input[type="range"]::-moz-range-thumb {
   border: 1px solid rgba(245, 158, 11, 0.3);
 }
 
+/* ── Flight Phase Progress Bar ─────────────────────────────────────────── */
+#flight-phase-bar {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 8px 16px;
+  background: rgba(10, 11, 17, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  z-index: 3;
+}
+
+.phase-step {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 20px;
+  transition: all 0.3s var(--ease-out);
+}
+
+.phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 0.3s var(--ease-out);
+  flex-shrink: 0;
+}
+
+.phase-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  transition: color 0.3s;
+}
+
+.phase-connector {
+  width: 16px;
+  height: 2px;
+  background: var(--text-muted);
+  opacity: 0.3;
+  transition: all 0.3s;
+  flex-shrink: 0;
+}
+
+.phase-connector.completed {
+  background: var(--cyan);
+  opacity: 0.6;
+}
+
+/* Active phase */
+.phase-step.active .phase-dot {
+  box-shadow: 0 0 10px currentColor;
+  animation: phase-pulse 1.5s ease-in-out infinite;
+}
+.phase-step.active .phase-label {
+  color: var(--text-0);
+}
+
+/* Completed phase */
+.phase-step.completed .phase-dot {
+  background: var(--emerald);
+}
+.phase-step.completed .phase-label {
+  color: var(--text-2);
+}
+
+/* Phase-specific active colors */
+#phase-ground.active .phase-dot { background: var(--rose); color: var(--rose); }
+#phase-ground.active .phase-label { color: var(--rose); }
+
+#phase-lifting.active .phase-dot { background: var(--violet); color: var(--violet); }
+#phase-lifting.active .phase-label { color: var(--violet); }
+
+#phase-cruising.active .phase-dot { background: var(--cyan); color: var(--cyan); }
+#phase-cruising.active .phase-label { color: var(--cyan); }
+
+#phase-descending.active .phase-dot { background: var(--amber); color: var(--amber); }
+#phase-descending.active .phase-label { color: var(--amber); }
+
+#phase-landed.active .phase-dot { background: var(--emerald); color: var(--emerald); }
+#phase-landed.active .phase-label { color: var(--emerald); }
+
+@keyframes phase-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.3); opacity: 0.7; }
+}
+
 /* View control buttons */
 #view-controls {
   position: absolute;
-  bottom: 14px;
+  bottom: 58px;
   right: 14px;
   display: flex;
   gap: 4px;
@@ -773,4 +886,9 @@ input[type="range"]::-moz-range-thumb {
     overflow-x: auto;
   }
   #controls-panel .card { min-width: 260px; flex-shrink: 0; }
+  #flight-phase-bar {
+    padding: 6px 10px;
+    border-radius: var(--radius-md);
+  }
+  .phase-label { display: none; }
 }

@@ -57,9 +57,11 @@ app = FastAPI(
     description=(
         "A 3-D physics-based reinforcement-learning environment where a drone "
         "navigates from a start location to a delivery target while avoiding "
-        "obstacles.  Compatible with the openenv protocol."
+        "obstacles.  Features flight phases (GROUND → LIFTING → CRUISING → "
+        "DESCENDING → LANDED), AABB box obstacles, and a 200m world.  "
+        "Compatible with the openenv protocol."
     ),
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -83,8 +85,8 @@ _sessions: Dict[str, DroneDeliveryEnvironment] = {}
 def _get_env(session_id: str) -> DroneDeliveryEnvironment:
     if session_id not in _sessions:
         _sessions[session_id] = DroneDeliveryEnvironment(
-            world_size=float(os.getenv("WORLD_SIZE", "50")),
-            num_obstacles=int(os.getenv("NUM_OBSTACLES", "8")),
+            world_size=float(os.getenv("WORLD_SIZE", "200")),
+            num_obstacles=int(os.getenv("NUM_OBSTACLES", "15")),
             seed=None,
         )
     return _sessions[session_id]
@@ -143,11 +145,20 @@ async def info():
         "delivery_radius_m": env.DELIVERY_RADIUS,
         "max_steps": env.MAX_STEPS,
         "voxel_size_m": env.VOXEL_SIZE,
+        "flight_phases": ["GROUND", "LIFTING", "CRUISING", "DESCENDING", "LANDED"],
+        "cruise_alt_margin_m": env.CRUISE_ALT_MARGIN,
+        "min_cruise_alt_m": env.MIN_CRUISE_ALT,
+        "horizontal_close_m": env.HORIZONTAL_CLOSE,
+        "obstacle_model": "AABB (axis-aligned bounding box, 2x2 footprint)",
         "observation_space": {
             "position": "3-D float (x, y, z)",
             "velocity": "3-D float (vx, vy, vz)",
+            "acceleration": "3-D float (vx, vy, vz) — last applied accel",
+            "flight_phase": "str: GROUND | LIFTING | CRUISING | DESCENDING | LANDED",
+            "cruise_altitude": "float (m) — dynamic, computed from obstacles",
             "target_position": "3-D float",
             "distance_to_target": "float",
+            "horizontal_distance_to_target": "float",
             "target_direction": "unit-vector [3]",
             "nearby_obstacles": "list[NearbyObstacle] (sensor range)",
             "min_obstacle_distance": "float",
@@ -160,6 +171,7 @@ async def info():
             "ax": f"float in [-{env.MAX_ACCEL}, {env.MAX_ACCEL}]",
             "ay": f"float in [-{env.MAX_ACCEL}, {env.MAX_ACCEL}]",
             "az": f"float in [-{env.MAX_ACCEL}, {env.MAX_ACCEL}]",
+            "note": "Full manual control — agent directly controls drone acceleration",
         },
         "reward_structure": {
             "delivery": env.DELIVERY_REWARD,
@@ -188,7 +200,7 @@ async def reset(
         # Create / replace session with custom settings
         _sessions[session_id] = DroneDeliveryEnvironment(
             world_size=body.world_size or DroneDeliveryEnvironment.WORLD_SIZE,
-            num_obstacles=body.num_obstacles or 8,
+            num_obstacles=body.num_obstacles or 15,
             seed=body.seed,
         )
 
@@ -207,9 +219,11 @@ async def step(
 
     Send acceleration commands ``(ax, ay, az)`` in m/s².
     Values are internally clamped to ``[-MAX_ACCEL, MAX_ACCEL]``.
+    The agent has full manual control over the drone's acceleration.
 
     Returns a full ``DroneObservation`` including:
-    * current position & velocity
+    * current position & velocity & acceleration
+    * flight phase
     * distance / direction to target
     * nearby obstacles (within sensor range)
     * next A* waypoint
@@ -250,11 +264,15 @@ async def get_state(
         "step_count": s.step_count,
         "drone_position": inner._pos.model_dump(),
         "drone_velocity": inner._vel.model_dump(),
+        "drone_acceleration": inner._accel.model_dump(),
         "target_position": inner._target.model_dump(),
         "distance_to_target": round(inner._dist_to_target(), 4),
+        "horizontal_distance_to_target": round(inner._horizontal_dist_to_target(), 4),
         "speed": round(
             math.sqrt(inner._vel.vx**2 + inner._vel.vy**2 + inner._vel.vz**2), 4
         ),
+        "flight_phase": inner.flight_phase.value,
+        "cruise_altitude": round(inner.cruise_altitude, 2),
         "num_obstacles": len(inner._obstacles),
         "path_length": len(inner._path),
         "total_reward": round(inner._total_reward, 4),
@@ -269,13 +287,13 @@ async def get_state(
 async def render(
     session_id: str = Query(default=_DEFAULT_SESSION),
     axis: str = Query(default="xy", description="Projection plane: 'xy' or 'xz'"),
-    size: int = Query(default=20, ge=10, le=60, description="Grid characters"),
+    size: int = Query(default=40, ge=10, le=80, description="Grid characters"),
 ):
     """
     ASCII top-down (XY) or side (XZ) projection of the environment.
 
     Legend:
-      D = drone, T = target, O = obstacle, . = free space
+      D = drone, T = target, # = obstacle, * = A*-path, . = free space
     """
     if session_id not in _sessions:
         raise HTTPException(status_code=400, detail="Session not found.")
@@ -294,10 +312,29 @@ async def render(
     else:
         get = lambda p: (p.x, p.y)
 
-    # Obstacles
+    # Obstacles (AABB — mark all cells covered by the box footprint)
     for obs in env._obstacles:
-        ci, cj = to_cell(*get(obs.position))
-        grid[cj][ci] = "O"
+        if axis == "xz":
+            # show X × Z extents
+            x_min, x_max = obs.position.x - obs.size_x/2, obs.position.x + obs.size_x/2
+            z_min, z_max = obs.position.z - obs.size_z/2, obs.position.z + obs.size_z/2
+            ci_min, _ = to_cell(x_min, 0)
+            ci_max, _ = to_cell(x_max, 0)
+            _, cj_min = to_cell(0, z_min)
+            _, cj_max = to_cell(0, z_max)
+        else:
+            # show X × Y extents
+            x_min, x_max = obs.position.x - obs.size_x/2, obs.position.x + obs.size_x/2
+            y_min, y_max = obs.position.y - obs.size_y/2, obs.position.y + obs.size_y/2
+            ci_min, _ = to_cell(x_min, 0)
+            ci_max, _ = to_cell(x_max, 0)
+            _, cj_min = to_cell(0, y_min)
+            _, cj_max = to_cell(0, y_max)
+
+        for ci in range(ci_min, ci_max + 1):
+            for cj in range(cj_min, cj_max + 1):
+                if 0 <= ci < size and 0 <= cj < size:
+                    grid[cj][ci] = "#"
 
     # Waypoints
     v = env.VOXEL_SIZE
@@ -316,7 +353,7 @@ async def render(
     grid[cj][ci] = "D"
 
     lines = ["".join(row) for row in reversed(grid)]
-    legend = "D=drone  T=target  O=obstacle  *=A*-path  .=free"
+    legend = "D=drone  T=target  #=obstacle  *=A*-path  .=free"
     return {"render": "\n".join(lines), "legend": legend, "axis": axis}
 
 
@@ -339,7 +376,7 @@ async def delete_session(session_id: str):
 async def get_obstacles(
     session_id: str = Query(default=_DEFAULT_SESSION),
 ):
-    """Return full obstacle list with absolute positions."""
+    """Return full obstacle list with absolute positions and AABB dimensions."""
     if session_id not in _sessions:
         raise HTTPException(status_code=400, detail="Session not found.")
     env = _sessions[session_id]
@@ -348,7 +385,9 @@ async def get_obstacles(
             {
                 "id": obs.id,
                 "position": obs.position.model_dump(),
-                "radius": obs.radius,
+                "size_x": obs.size_x,
+                "size_y": obs.size_y,
+                "size_z": obs.size_z,
                 "obstacle_type": obs.obstacle_type,
             }
             for obs in env._obstacles
