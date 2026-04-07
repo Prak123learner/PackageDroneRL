@@ -100,6 +100,20 @@ class NearbyObstacle(BaseModel):
     obstacle_type: str
 
 
+class ObstacleConfig(BaseModel):
+    """Input model for specifying a custom obstacle via the API."""
+    x: float = Field(..., description="X position of obstacle centre")
+    y: float = Field(..., description="Y position of obstacle centre")
+    z: Optional[float] = Field(
+        default=None,
+        description="Z centre position (defaults to height/2, sitting on the ground)",
+    )
+    height: float = Field(default=10.0, ge=1.0, description="Obstacle height in metres")
+    size_x: float = Field(default=2.0, ge=0.5, description="Footprint X extent (m)")
+    size_y: float = Field(default=2.0, ge=0.5, description="Footprint Y extent (m)")
+    obstacle_type: str = Field(default="building", description="Type: building, tower, tree, antenna")
+
+
 # ─────────────────────────────────────────────
 #  Action
 # ─────────────────────────────────────────────

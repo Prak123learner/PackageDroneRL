@@ -23,7 +23,7 @@ Physics model
   - Euler integration at configurable dt (default 0.1 s).
   - Acceleration commands are clamped to [-max_accel, +max_accel].
   - Speed is clamped to max_speed after integration.
-  - Agent has full manual control over (ax, ay, az).
+  - Agent has full control over (ax, ay, az) thrust commands.
 
 Obstacle Model
 --------------
@@ -58,12 +58,12 @@ from openenv.core.env_server.types import State
 try:
     from .models import (
         DroneAction, DroneObservation, FlightPhase,
-        Position, Velocity, Obstacle, NearbyObstacle,
+        Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
     )
 except ImportError:
     from models import (               # type: ignore[no-redef]
         DroneAction, DroneObservation, FlightPhase,
-        Position, Velocity, Obstacle, NearbyObstacle,
+        Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
     )
 
 
@@ -229,7 +229,7 @@ class DroneDeliveryEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     # ── Physics ──────────────────────────────
-    MAX_SPEED:   float = 15.0    # m/s
+    MAX_SPEED:   float = 16.67   # m/s  (≈ 60 km/h)
     MAX_ACCEL:   float = 5.0     # m/s²
     DRAG:        float = 0.05    # proportional damping coefficient
     DT:          float = 0.1     # simulation timestep (s)
@@ -262,6 +262,7 @@ class DroneDeliveryEnvironment(Environment):
     COLLISION_PENALTY:    float = -100.0
     OOB_PENALTY:          float =  -50.0
     PROGRESS_SCALE:       float =   1.0
+    NEAR_MISS_BONUS:      float =   0.3   # bonus for flying near obstacles without colliding
     LIVING_PENALTY:       float =  -0.1
     PATH_BONUS:           float =   0.5   # bonus per step on A* path corridor
 
@@ -297,8 +298,26 @@ class DroneDeliveryEnvironment(Environment):
     #  Public API
     # ──────────────────────────────────────────
 
-    def reset(self) -> DroneObservation:
-        """Randomise start / target / obstacles and plan an A* path."""
+    def reset(
+        self,
+        *,
+        start_pos: Optional[Position] = None,
+        target_pos: Optional[Position] = None,
+        custom_obstacles: Optional[List[ObstacleConfig]] = None,
+    ) -> DroneObservation:
+        """
+        Reset the environment for a new episode.
+
+        Parameters
+        ----------
+        start_pos : Position, optional
+            Custom start position.  Defaults to random ~(10, 10, 0).
+        target_pos : Position, optional
+            Custom delivery target. Defaults to random ~(180, 180, 0).
+        custom_obstacles : list[ObstacleConfig], optional
+            User-defined obstacles.  When provided, random generation is
+            skipped and these obstacles are used instead.
+        """
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._done = False
         self._collision = False
@@ -310,31 +329,49 @@ class DroneDeliveryEnvironment(Environment):
         ws = self._world_size
         jitter = lambda base, spread: base + self._rng.uniform(-spread, spread)
 
-        # Start on the ground
-        self._pos = Position(
-            x=jitter(10.0, 3.0),
-            y=jitter(10.0, 3.0),
-            z=0.0,  # on the ground
-        )
+        # ── Start position ──
+        if start_pos is not None:
+            self._pos = Position(x=start_pos.x, y=start_pos.y, z=0.0)
+        else:
+            self._pos = Position(
+                x=jitter(10.0, 3.0),
+                y=jitter(10.0, 3.0),
+                z=0.0,
+            )
         self._vel = Velocity()
         self._accel = Velocity()
 
-        # Target also on the ground
-        self._target = Position(
-            x=jitter(ws - 20.0, 5.0),
-            y=jitter(ws - 20.0, 5.0),
-            z=0.0,  # landing target
-        )
+        # ── Target position ──
+        if target_pos is not None:
+            self._target = Position(x=target_pos.x, y=target_pos.y, z=0.0)
+        else:
+            self._target = Position(
+                x=jitter(ws - 20.0, 5.0),
+                y=jitter(ws - 20.0, 5.0),
+                z=0.0,
+            )
 
-        self._obstacles = self._generate_obstacles()
+        # ── Obstacles ──
+        if custom_obstacles is not None:
+            self._obstacles = self._build_custom_obstacles(custom_obstacles)
+        else:
+            self._obstacles = self._generate_obstacles()
+
         self._cruise_altitude = self._compute_cruise_altitude()
         self._prev_dist = self._dist_to_target()
         self._plan_path()
 
         return self._make_observation(reward=0.0)
 
+    # ── Autopilot constants (used by baseline policy in example_usage.py) ──
+    LIFT_ACCEL:      float = 4.0   # m/s² – upward thrust during GROUND/LIFTING
+    CRUISE_ACCEL:    float = 3.5   # m/s² – horizontal thrust toward waypoint
+    ALT_HOLD_GAIN:   float = 2.0   # proportional gain for altitude hold
+    DESCEND_ACCEL:   float = 2.5   # m/s² – descent thrust toward landing spot
+    APPROACH_ACCEL:  float = 1.5   # m/s² – gentle horizontal correction on descent
+
     def step(self, action: DroneAction) -> DroneObservation:  # type: ignore[override]
-        """Apply thrust, integrate physics, update flight phase, compute reward."""
+        """Apply the agent's thrust commands, integrate physics, update flight phase, compute reward."""
         if self._done:
             return self._make_observation(reward=0.0)
 
@@ -360,7 +397,7 @@ class DroneDeliveryEnvironment(Environment):
                 az = 0.0
 
         elif self._flight_phase == FlightPhase.CRUISING:
-            # Full agent control, no restrictions
+            # Full agent control — no restrictions
             pass
 
         elif self._flight_phase == FlightPhase.DESCENDING:
@@ -419,12 +456,96 @@ class DroneDeliveryEnvironment(Environment):
             if self._on_path_corridor():
                 reward += self.PATH_BONUS
 
+            # near-miss navigation bonus – reward skilful flying near obstacles
+            if self._flight_phase in (FlightPhase.CRUISING, FlightPhase.DESCENDING):
+                for obs in self._obstacles:
+                    dist = _aabb_point_distance(obs, self._pos.x, self._pos.y, self._pos.z)
+                    if self.DRONE_RADIUS < dist < self.DRONE_RADIUS + 3.0:
+                        # Close but safe – bonus proportional to closeness
+                        reward += self.NEAR_MISS_BONUS * (1.0 - dist / (self.DRONE_RADIUS + 3.0))
+                        break  # only count the closest one
+
         # max-step timeout
         if self._state.step_count >= self.MAX_STEPS:
             self._done = True
 
         self._total_reward += reward
         return self._make_observation(reward=reward)
+
+    def _compute_autopilot_acceleration(self) -> Tuple[float, float, float]:
+        """
+        Compute deterministic acceleration based on the current flight phase.
+
+        GROUND / LIFTING  – thrust upward to reach cruise altitude; minimal XY.
+        CRUISING          – steer horizontally toward the next A* waypoint (or
+                            target) while holding cruise altitude via P-control.
+        DESCENDING        – glide down toward the landing position.
+        LANDED            – zero thrust.
+        """
+        phase = self._flight_phase
+
+        if phase == FlightPhase.GROUND:
+            # Pure vertical lift-off, no horizontal
+            return (0.0, 0.0, self.LIFT_ACCEL)
+
+        if phase == FlightPhase.LIFTING:
+            # Strong upward thrust + gentle drift toward target direction
+            alt_error = self._cruise_altitude - self._pos.z
+            az = self._clamp(alt_error * self.ALT_HOLD_GAIN, 0.0, self.LIFT_ACCEL)
+
+            # Light horizontal nudge toward the first waypoint / target
+            dx, dy, _ = self._waypoint_direction()
+            nudge = self.CRUISE_ACCEL * 0.3  # 30 % of cruise thrust
+            return (dx * nudge, dy * nudge, az)
+
+        if phase == FlightPhase.CRUISING:
+            # ── horizontal: steer toward next waypoint ──
+            dx, dy, _ = self._waypoint_direction()
+            ax = dx * self.CRUISE_ACCEL
+            ay = dy * self.CRUISE_ACCEL
+
+            # ── vertical: P-controller to hold cruise altitude ──
+            alt_error = self._cruise_altitude - self._pos.z
+            az = self._clamp(alt_error * self.ALT_HOLD_GAIN,
+                             -self.MAX_ACCEL, self.MAX_ACCEL)
+            return (ax, ay, az)
+
+        if phase == FlightPhase.DESCENDING:
+            # Steer toward the landing position (target at z=0)
+            dx = self._target.x - self._pos.x
+            dy = self._target.y - self._pos.y
+            dz = self._target.z - self._pos.z   # target.z is 0
+            hdist = math.sqrt(dx * dx + dy * dy) + 1e-8
+
+            # Horizontal correction
+            ax = (dx / hdist) * self.APPROACH_ACCEL
+            ay = (dy / hdist) * self.APPROACH_ACCEL
+
+            # Controlled descent – proportional to current altitude
+            az = self._clamp(dz * self.ALT_HOLD_GAIN,
+                             -self.DESCEND_ACCEL, 0.0)
+            return (ax, ay, az)
+
+        # LANDED – no thrust
+        return (0.0, 0.0, 0.0)
+
+    def _waypoint_direction(self) -> Tuple[float, float, float]:
+        """
+        Unit vector toward the current A* waypoint, or toward the target
+        if no path exists.
+        """
+        wp = self._current_waypoint()
+        if wp is not None:
+            dx = wp.x - self._pos.x
+            dy = wp.y - self._pos.y
+            dz = wp.z - self._pos.z
+        else:
+            dx = self._target.x - self._pos.x
+            dy = self._target.y - self._pos.y
+            dz = self._target.z - self._pos.z
+
+        mag = math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-8
+        return (dx / mag, dy / mag, dz / mag)
 
     @property
     def state(self) -> State:
@@ -516,8 +637,29 @@ class DroneDeliveryEnvironment(Environment):
                     break
         return obstacles
 
+    def _build_custom_obstacles(self, configs: List[ObstacleConfig]) -> List[Obstacle]:
+        """Convert user-supplied ObstacleConfig list into Obstacle objects."""
+        obstacles = []
+        for i, cfg in enumerate(configs):
+            z = cfg.z if cfg.z is not None else cfg.height / 2.0
+            obstacles.append(Obstacle(
+                id=i,
+                position=Position(x=cfg.x, y=cfg.y, z=z),
+                size_x=cfg.size_x,
+                size_y=cfg.size_y,
+                size_z=cfg.height,
+                obstacle_type=cfg.obstacle_type,
+            ))
+        return obstacles
+
     def _plan_path(self):
-        """Run A* and cache voxel waypoints."""
+        """
+        Run A* and cache voxel waypoints.
+
+        Plans at the median obstacle height so the path must route *around*
+        tall obstacles rather than trivially flying above everything.
+        If the low-altitude plan fails, falls back to cruise altitude.
+        """
         def to_voxel(p: Position) -> Tuple[int, int, int]:
             v = self.VOXEL_SIZE
             return (
@@ -526,24 +668,54 @@ class DroneDeliveryEnvironment(Environment):
                 max(0, min(self.GRID_SIZE-1, int(p.z / v))),
             )
 
-        # Plan at cruise altitude
-        cruise_start = Position(
-            x=self._pos.x, y=self._pos.y, z=self._cruise_altitude
+        # Compute a planning altitude at the median obstacle height
+        # so that taller obstacles force the path around them
+        if self._obstacles:
+            heights = sorted(
+                obs.position.z + obs.size_z / 2.0 for obs in self._obstacles
+            )
+            planning_alt = heights[len(heights) // 2]   # median top
+        else:
+            planning_alt = self.MIN_CRUISE_ALT
+
+        # Ensure minimum safe planning altitude
+        planning_alt = max(planning_alt, self.VOXEL_SIZE)
+
+        plan_start = Position(
+            x=self._pos.x, y=self._pos.y, z=planning_alt
         )
-        cruise_target = Position(
-            x=self._target.x, y=self._target.y, z=self._cruise_altitude
+        plan_target = Position(
+            x=self._target.x, y=self._target.y, z=planning_alt
         )
 
-        start_v = to_voxel(cruise_start)
-        goal_v  = to_voxel(cruise_target)
+        start_v = to_voxel(plan_start)
+        goal_v  = to_voxel(plan_target)
 
-        self._path = _astar(
+        path = _astar(
             start_v, goal_v,
             self._obstacles,
             self.GRID_SIZE,
             self.VOXEL_SIZE,
             self.DRONE_RADIUS,
         )
+
+        # Fallback: if no path at low altitude, plan at cruise altitude
+        if not path:
+            cruise_start = Position(
+                x=self._pos.x, y=self._pos.y, z=self._cruise_altitude
+            )
+            cruise_target = Position(
+                x=self._target.x, y=self._target.y, z=self._cruise_altitude
+            )
+            path = _astar(
+                to_voxel(cruise_start), to_voxel(cruise_target),
+                self._obstacles,
+                self.GRID_SIZE,
+                self.VOXEL_SIZE,
+                self.DRONE_RADIUS,
+            )
+
+        self._path = path
         self._waypoint_idx = 0
 
     def _current_waypoint(self) -> Optional[Position]:

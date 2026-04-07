@@ -46,7 +46,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from environment import DroneDeliveryEnvironment
-from models import DroneAction, DroneObservation, Position
+from models import DroneAction, DroneObservation, Position, ObstacleConfig
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  App setup
@@ -106,6 +106,9 @@ class ResetRequest(BaseModel):
     world_size: Optional[float] = None
     num_obstacles: Optional[int] = None
     seed: Optional[int] = None
+    start_position: Optional[Dict[str, float]] = None   # {"x": ..., "y": ...}
+    target_position: Optional[Dict[str, float]] = None   # {"x": ..., "y": ...}
+    obstacles: Optional[list] = None                     # list of ObstacleConfig dicts
 
 
 def _obs_to_dict(obs: DroneObservation) -> Dict[str, Any]:
@@ -180,6 +183,15 @@ async def info():
             "living_penalty_per_step": env.LIVING_PENALTY,
             "progress_scale": env.PROGRESS_SCALE,
             "path_bonus_per_step": env.PATH_BONUS,
+            "near_miss_bonus": env.NEAR_MISS_BONUS,
+        },
+        "reset_options": {
+            "world_size": "float — world dimensions in metres",
+            "num_obstacles": "int — number of random obstacles",
+            "seed": "int — RNG seed for reproducibility",
+            "start_position": "{x, y} — custom drone start position",
+            "target_position": "{x, y} — custom delivery target",
+            "obstacles": "list of {x, y, height, size_x, size_y, obstacle_type} — custom obstacles",
         },
     }
 
@@ -192,9 +204,8 @@ async def reset(
     """
     Reset the environment and start a new episode.
 
-    Optionally override ``world_size``, ``num_obstacles``, and ``seed``
-    to create a custom scenario.  If a new ``seed`` is provided the
-    obstacle layout is deterministic.
+    Optionally override ``world_size``, ``num_obstacles``, ``seed``,
+    ``start_position``, ``target_position``, or provide custom ``obstacles``.
     """
     if body.world_size or body.num_obstacles or body.seed is not None:
         # Create / replace session with custom settings
@@ -205,7 +216,31 @@ async def reset(
         )
 
     env = _get_env(session_id)
-    obs = env.reset()
+
+    # Build optional kwargs for reset()
+    reset_kwargs: Dict[str, Any] = {}
+
+    if body.start_position:
+        reset_kwargs["start_pos"] = Position(
+            x=body.start_position.get("x", 10.0),
+            y=body.start_position.get("y", 10.0),
+            z=0.0,
+        )
+
+    if body.target_position:
+        reset_kwargs["target_pos"] = Position(
+            x=body.target_position.get("x", 180.0),
+            y=body.target_position.get("y", 180.0),
+            z=0.0,
+        )
+
+    if body.obstacles:
+        reset_kwargs["custom_obstacles"] = [
+            ObstacleConfig(**o) if isinstance(o, dict) else o
+            for o in body.obstacles
+        ]
+
+    obs = env.reset(**reset_kwargs)
     return JSONResponse(_obs_to_dict(obs))
 
 

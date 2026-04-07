@@ -3,7 +3,7 @@
 from .environment import DroneDeliveryEnvironment
 from .models import (
     DroneAction, DroneObservation, FlightPhase,
-    Position, Velocity, Obstacle, NearbyObstacle,
+    Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
 )
 from .client import DroneEnv
 
@@ -16,5 +16,6 @@ __all__ = [
     "Velocity",
     "Obstacle",
     "NearbyObstacle",
+    "ObstacleConfig",
     "DroneEnv",
 ]
