@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Drone Delivery – RL Simulator</title>
+  <meta name="description" content="Interactive 3D drone delivery reinforcement-learning environment simulator with real-time physics visualization." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- ── Ambient floating particles ── -->
+  <div id="particles-bg"></div>
+
+  <!-- ── Header ── -->
+  <header id="app-header">
+    <div class="header-left">
+      <div class="logo-mark">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+          <path d="M14 2L26 8V20L14 26L2 20V8L14 2Z" stroke="url(#grad1)" stroke-width="2" fill="none"/>
+          <circle cx="14" cy="14" r="4" fill="url(#grad1)"/>
+          <defs><linearGradient id="grad1" x1="0" y1="0" x2="28" y2="28"><stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/></linearGradient></defs>
+        </svg>
+      </div>
+      <div>
+        <h1>Drone Delivery Simulator</h1>
+        <p class="subtitle">3D Reinforcement Learning Environment</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="connection-badge" id="connection-badge">
+        <span class="dot"></span>
+        <span class="label">Disconnected</span>
+      </div>
+      <label class="api-url-wrapper">
+        <span>API</span>
+        <input type="text" id="api-url" value="http://localhost:8000" spellcheck="false" />
+      </label>
+    </div>
+  </header>
+
+  <!-- ── Main layout ── -->
+  <main id="app-main">
+    <!-- LEFT PANEL – Controls -->
+    <aside id="controls-panel">
+
+      <!-- Location Config Card -->
+      <section class="card" id="location-card">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+          <h2>Location Config</h2>
+        </div>
+        <div class="card-body">
+          <div class="field-group">
+            <label class="field-label">Start Position</label>
+            <div class="xyz-row">
+              <div class="xyz-field">
+                <span class="axis-tag x">X</span>
+                <input type="number" id="start-x" value="5" step="1" />
+              </div>
+              <div class="xyz-field">
+                <span class="axis-tag y">Y</span>
+                <input type="number" id="start-y" value="5" step="1" />
+              </div>
+              <div class="xyz-field">
+                <span class="axis-tag z">Z</span>
+                <input type="number" id="start-z" value="5" step="1" />
+              </div>
+            </div>
+          </div>
+          <div class="field-group">
+            <label class="field-label">Target Position</label>
+            <div class="xyz-row">
+              <div class="xyz-field">
+                <span class="axis-tag x">X</span>
+                <input type="number" id="end-x" value="45" step="1" />
+              </div>
+              <div class="xyz-field">
+                <span class="axis-tag y">Y</span>
+                <input type="number" id="end-y" value="45" step="1" />
+              </div>
+              <div class="xyz-field">
+                <span class="axis-tag z">Z</span>
+                <input type="number" id="end-z" value="10" step="1" />
+              </div>
+            </div>
+          </div>
+          <div class="field-group inline-fields">
+            <div>
+              <label class="field-label">Obstacles</label>
+              <input type="number" id="num-obstacles" value="8" min="0" max="20" />
+            </div>
+            <div>
+              <label class="field-label">Seed</label>
+              <input type="number" id="seed" value="" placeholder="random" />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Acceleration Controls Card -->
+      <section class="card" id="accel-card">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          <h2>Acceleration (m/s²)</h2>
+        </div>
+        <div class="card-body">
+          <div class="slider-group">
+            <div class="slider-header">
+              <label>a<sub>x</sub></label>
+              <output id="ax-val">0.0</output>
+            </div>
+            <input type="range" id="ax" min="-5" max="5" step="0.1" value="0" />
+          </div>
+          <div class="slider-group">
+            <div class="slider-header">
+              <label>a<sub>y</sub></label>
+              <output id="ay-val">0.0</output>
+            </div>
+            <input type="range" id="ay" min="-5" max="5" step="0.1" value="0" />
+          </div>
+          <div class="slider-group">
+            <div class="slider-header">
+              <label>a<sub>z</sub></label>
+              <output id="az-val">0.0</output>
+            </div>
+            <input type="range" id="az" min="-5" max="5" step="0.1" value="0" />
+          </div>
+          <div class="accel-quick">
+            <button class="chip" data-ax="0" data-ay="0" data-az="0" id="btn-zero">Zero</button>
+            <button class="chip" data-ax="3" data-ay="3" data-az="1" id="btn-forward">Forward ↗</button>
+            <button class="chip" data-ax="0" data-ay="0" data-az="3" id="btn-up">Up ↑</button>
+            <button class="chip" data-ax="-2" data-ay="-2" data-az="0" id="btn-brake">Brake ⏹</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Action Buttons -->
+      <section class="card action-card" id="action-card">
+        <div class="btn-row">
+          <button class="btn btn-primary" id="btn-reset">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+            Reset
+          </button>
+          <button class="btn btn-accent" id="btn-step">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Step
+          </button>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-success" id="btn-auto">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+            Auto-Pilot
+          </button>
+          <button class="btn btn-danger" id="btn-stop" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><rect x="9" y="9" width="6" height="6"/></svg>
+            Stop
+          </button>
+        </div>
+        <div class="speed-control">
+          <label>Sim Speed</label>
+          <input type="range" id="sim-speed" min="1" max="30" value="10" />
+          <output id="sim-speed-val">10 steps/s</output>
+        </div>
+      </section>
+    </aside>
+
+    <!-- CENTER – 3D Canvas -->
+    <section id="viewport-section">
+      <div id="viewport-wrapper">
+        <canvas id="drone-canvas"></canvas>
+        <div id="viewport-overlay">
+          <div class="overlay-top-left">
+            <span id="overlay-episode">Episode: —</span>
+            <span id="overlay-step">Step: 0 / 500</span>
+          </div>
+          <div class="overlay-top-right">
+            <span id="overlay-reward">Reward: 0.00</span>
+            <span id="overlay-dist">Dist: —</span>
+          </div>
+          <div class="overlay-bottom-center" id="overlay-status"></div>
+        </div>
+        <div id="view-controls">
+          <button class="view-btn active" data-view="perspective" id="view-3d">3D</button>
+          <button class="view-btn" data-view="top" id="view-top">Top</button>
+          <button class="view-btn" data-view="side" id="view-side">Side</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANEL – Telemetry -->
+    <aside id="telemetry-panel">
+      <section class="card" id="drone-state-card">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          <h2>Drone Telemetry</h2>
+        </div>
+        <div class="card-body telem-grid">
+          <div class="telem-item">
+            <span class="telem-label">Position</span>
+            <span class="telem-value mono" id="telem-pos">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Velocity</span>
+            <span class="telem-value mono" id="telem-vel">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Speed</span>
+            <span class="telem-value mono" id="telem-speed">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Target</span>
+            <span class="telem-value mono" id="telem-target">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Distance</span>
+            <span class="telem-value mono" id="telem-dist">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Direction</span>
+            <span class="telem-value mono" id="telem-dir">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Waypoint</span>
+            <span class="telem-value mono" id="telem-wp">—</span>
+          </div>
+          <div class="telem-item">
+            <span class="telem-label">Path Left</span>
+            <span class="telem-value mono" id="telem-path">—</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="status-card">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          <h2>Mission Status</h2>
+        </div>
+        <div class="card-body">
+          <div class="status-flags">
+            <div class="flag" id="flag-delivered"><span class="flag-dot"></span>Delivered</div>
+            <div class="flag" id="flag-collision"><span class="flag-dot"></span>Collision</div>
+            <div class="flag" id="flag-oob"><span class="flag-dot"></span>Out of Bounds</div>
+            <div class="flag" id="flag-done"><span class="flag-dot"></span>Done</div>
+          </div>
+          <div class="telem-grid" style="margin-top:12px">
+            <div class="telem-item">
+              <span class="telem-label">Step Reward</span>
+              <span class="telem-value mono" id="telem-step-reward">—</span>
+            </div>
+            <div class="telem-item">
+              <span class="telem-label">Total Reward</span>
+              <span class="telem-value mono" id="telem-total-reward">—</span>
+            </div>
+            <div class="telem-item">
+              <span class="telem-label">Steps Left</span>
+              <span class="telem-value mono" id="telem-steps-left">—</span>
+            </div>
+            <div class="telem-item">
+              <span class="telem-label">Obstacles</span>
+              <span class="telem-value mono" id="telem-obs-count">—</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="reward-chart-card">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <h2>Reward History</h2>
+        </div>
+        <div class="card-body">
+          <canvas id="reward-chart" height="120"></canvas>
+        </div>
+      </section>
+
+      <section class="card" id="obstacles-card">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <h2>Nearby Obstacles</h2>
+        </div>
+        <div class="card-body">
+          <div id="obstacles-list" class="obstacles-list"><span class="muted">No data</span></div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- ── Event log toast area ── -->
+  <div id="toast-area"></div>
+
+  <script src="/static/renderer.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
