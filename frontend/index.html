@@ -150,6 +150,51 @@
             <button class="chip" data-ax="0" data-ay="0" data-az="-2" id="btn-descend">Descend ⬇</button>
             <button class="chip" data-ax="-2" data-ay="-2" data-az="0" id="btn-brake">Brake ⏹</button>
           </div>
+          <p class="hint" style="margin-top:8px;font-size:0.72rem;color:var(--text-muted)">Arrow keys adjust sliders. <kbd>Space</kbd> to step, <kbd>A</kbd> to auto-run.</p>
+        </div>
+      </section>
+
+      <!-- Custom Obstacle Editor -->
+      <section class="card" id="obstacle-editor-card">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7" />
+            <rect x="14" y="3" width="7" height="7" />
+            <rect x="3" y="14" width="7" height="7" />
+            <line x1="17.5" y1="14" x2="17.5" y2="21" />
+            <line x1="14" y1="17.5" x2="21" y2="17.5" />
+          </svg>
+          <h2>Custom Obstacles</h2>
+        </div>
+        <div class="card-body">
+          <div class="xyz-row" style="gap:6px;margin-bottom:8px">
+            <div class="xyz-field">
+              <span class="axis-tag x">X</span>
+              <input type="number" id="obs-x" value="100" step="5" />
+            </div>
+            <div class="xyz-field">
+              <span class="axis-tag y">Y</span>
+              <input type="number" id="obs-y" value="100" step="5" />
+            </div>
+            <div class="xyz-field">
+              <span class="axis-tag" style="background:var(--cyan)">H</span>
+              <input type="number" id="obs-h" value="15" step="1" min="1" />
+            </div>
+          </div>
+          <div class="field-group inline-fields" style="margin-bottom:8px">
+            <div style="flex:1">
+              <select id="obs-type" style="width:100%;padding:6px;border-radius:6px;background:var(--surface-2);color:var(--text-primary);border:1px solid var(--border)">
+                <option value="building">Building</option>
+                <option value="tower">Tower</option>
+                <option value="tree">Tree</option>
+                <option value="antenna">Antenna</option>
+              </select>
+            </div>
+            <button class="btn btn-accent" id="btn-add-obstacle" style="padding:6px 14px;font-size:0.8rem">+ Add</button>
+          </div>
+          <div id="custom-obstacles-list" class="obstacles-list">
+            <span class="muted">No custom obstacles – will use random</span>
+          </div>
         </div>
       </section>
 
@@ -176,7 +221,7 @@
               <circle cx="12" cy="12" r="10" />
               <polygon points="10 8 16 12 10 16 10 8" />
             </svg>
-            Auto-Pilot
+            Auto-Run
           </button>
           <button class="btn btn-danger" id="btn-stop" disabled>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -10,7 +10,12 @@ MANDATORY ENV VARS
     API_BASE_URL       LLM API endpoint.
     MODEL_NAME         Model identifier.
     HF_TOKEN           HuggingFace / API key.
-    IMAGE_NAME         Docker image for the environment.
+
+OPTIONAL ENV VARS
+-----------------
+    IMAGE_NAME         Docker image for the environment (docker mode).
+    ENV_URL            URL of a running environment server (url mode).
+                       Defaults to http://localhost:7860 (HF Spaces port).
 
 STDOUT FORMAT
 -------------
@@ -36,6 +41,7 @@ from models import DroneAction, DroneObservation
 # ──────────────────────────────────────────────────────────────────────────────
 
 IMAGE_NAME = os.getenv("IMAGE_NAME")
+ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
@@ -257,7 +263,13 @@ def get_llm_action(
 async def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    env = await DroneEnv.from_docker_image(IMAGE_NAME)
+    # Connect to environment: Docker image or running server URL
+    if IMAGE_NAME:
+        print(f"[DEBUG] Launching env from Docker image: {IMAGE_NAME}", flush=True)
+        env = await DroneEnv.from_docker_image(IMAGE_NAME)
+    else:
+        print(f"[DEBUG] Connecting to env at: {ENV_URL}", flush=True)
+        env = DroneEnv(base_url=ENV_URL)
 
     history: List[Dict] = []
     rewards: List[float] = []

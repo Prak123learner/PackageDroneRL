@@ -33,6 +33,18 @@ curl -X POST https://<your-space>.hf.space/step \
 curl https://<your-space>.hf.space/state
 ```
 
+### Run a grading task
+```bash
+curl -X POST https://<your-space>.hf.space/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_id": "downtown"}'
+```
+
+### Grade the episode
+```bash
+curl https://<your-space>.hf.space/grade
+```
+
 ### ASCII render
 ```bash
 curl "https://<your-space>.hf.space/render?axis=xy&size=25"
@@ -56,26 +68,43 @@ curl -X POST "https://<your-space>.hf.space/step?session_id=$SESSION" \
 ## Python client (with openenv)
 
 ```python
-from drone_env.client import DroneEnv
-from drone_env.models import DroneAction
+from client import DroneEnv
+from models import DroneAction
 
 with DroneEnv(base_url="https://<your-space>.hf.space") as client:
     result = client.reset()
-    print(result.position, result.distance_to_target)
+    obs = result.observation
+    print(obs.position, obs.distance_to_target)
 
     for _ in range(100):
-        # naive greedy policy: thrust towards target
-        obs = result
         action = DroneAction(
             ax=obs.target_direction[0] * 3.0,
             ay=obs.target_direction[1] * 3.0,
             az=obs.target_direction[2] * 3.0,
         )
         result = client.step(action)
+        obs = result.observation
         if result.done:
-            print("Delivered!" if result.package_delivered else "Failed.")
+            print("Delivered!" if obs.package_delivered else "Failed.")
             break
 ```
+
+---
+
+## Grading Tasks
+
+Five pre-defined tasks with escalating difficulty:
+
+| Task ID | Difficulty | World | Obstacles | Delivery Radius | Max Steps |
+|---|---|---|---|---|---|
+| `clear_sky` | Easy | 100m | 0 | 3.0m | 500 |
+| `suburbs` | Medium | 150m | 6 | 2.5m | 800 |
+| `downtown` | Hard | 200m | 15 | 2.0m | 1500 |
+| `precision_drop` | Hard | 150m | 5 | 0.8m | 1000 |
+| `gauntlet` | Expert | 200m | 25 | 0.6m | 1200 |
+
+Scores are normalized to **[0.0, 1.0]** using weighted components:
+delivery (40%), progress (25%), efficiency (15%), safety (10%), smoothness (10%).
 
 ---
 
@@ -83,14 +112,14 @@ with DroneEnv(base_url="https://<your-space>.hf.space") as client:
 
 | Property | Value |
 |---|---|
-| World size | 50 × 50 × 50 m |
-| Max speed | 10 m/s |
-| Max acceleration | 5 m/s² |
+| World size | 200 × 200 × 200 m |
+| Max speed | 16.67 m/s (60 km/h) |
+| Max acceleration | ±5 m/s² |
 | Drone collision radius | 0.4 m |
-| Sensor range | 10 m |
-| Delivery tolerance | 1.5 m |
-| Max steps per episode | 500 |
-| Default obstacles | 8 random buildings/towers |
+| Sensor range | 25 m |
+| Default delivery radius | 2.0 m |
+| Default max steps | 2000 |
+| Default obstacles | 15 random buildings/towers |
 
 ### Observation space
 
@@ -98,11 +127,21 @@ with DroneEnv(base_url="https://<your-space>.hf.space") as client:
 |---|---|---|
 | `position` | `{x,y,z}` | Current drone position (m) |
 | `velocity` | `{vx,vy,vz}` | Current drone velocity (m/s) |
+| `acceleration` | `{vx,vy,vz}` | Applied acceleration (m/s²) |
+| `flight_phase` | `string` | GROUND, LIFTING, CRUISING, DESCENDING, or LANDED |
+| `cruise_altitude` | `float` | Computed safe cruising altitude (m) |
 | `target_position` | `{x,y,z}` | Delivery target |
-| `distance_to_target` | `float` | Euclidean distance to goal |
+| `distance_to_target` | `float` | Euclidean distance to goal (m) |
+| `horizontal_distance_to_target` | `float` | XY distance to target (m) |
 | `target_direction` | `[3]` | Unit vector towards target |
-| `nearby_obstacles` | `list` | Obstacles within 10 m sensor range |
+| `nearby_obstacles` | `list` | Obstacles within 25 m sensor range |
+| `min_obstacle_distance` | `float` | Distance to nearest obstacle (m) |
 | `next_waypoint` | `{x,y,z}` | Next A* waypoint (navigation hint) |
+| `path_length` | `int` | Remaining waypoints in A* path |
+| `steps_remaining` | `int` | Steps until episode timeout |
+| `package_delivered` | `bool` | Whether delivery succeeded |
+| `collision_occurred` | `bool` | Whether drone hit an obstacle |
+| `out_of_bounds` | `bool` | Whether drone left world bounds |
 | `done` | `bool` | Episode ended |
 | `reward` | `float` | Per-step reward |
 
@@ -118,10 +157,14 @@ Accelerations in m/s², clamped to ±5 m/s² internally.
 | Event | Reward |
 |---|---|
 | Package delivered | +100 |
+| Smooth landing (speed < 2 m/s) | +5 × (1 - speed/2) |
 | Collision | −100 |
 | Out of bounds | −50 |
 | Progress toward goal | +Δdist × 1.0 |
+| Heading alignment | +0.3 × dot(vel, target_dir) |
 | On A* path corridor | +0.5 / step |
+| Near-miss navigation | +0.3 × factor |
+| Altitude error > 3m | −0.2 / step |
 | Living penalty | −0.1 / step |
 
 ---
@@ -136,6 +179,9 @@ Accelerations in m/s², clamped to ±5 m/s² internally.
 | `POST` | `/step` | Advance simulation |
 | `GET` | `/state` | Episode state snapshot |
 | `GET` | `/render` | ASCII world projection |
+| `GET` | `/obstacles` | Full obstacle list |
 | `GET` | `/sessions` | List active sessions |
 | `DELETE` | `/sessions/{id}` | Remove a session |
+| `GET` | `/tasks` | List available grading tasks |
+| `GET` | `/grade` | Grade completed episode (returns 0.0–1.0) |
 | `GET` | `/docs` | Interactive Swagger UI |

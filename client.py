@@ -4,23 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Drone Delivery Environment – HTTP/WebSocket client."""
+"""Drone Delivery Environment – WebSocket client (openenv-based)."""
 
-import requests
 from typing import Dict, Optional, Tuple
 
-try:
-    from openenv.core import EnvClient
-    from openenv.core.client_types import StepResult
-    from openenv.core.env_server.types import State
-    _HAS_OPENENV = True
-except ImportError:
-    _HAS_OPENENV = False
+from openenv.core import EnvClient
+from openenv.core.client_types import StepResult
+from openenv.core.env_server.types import State
 
-from .models import (
-    DroneAction, DroneObservation, FlightPhase,
-    Position, Velocity, NearbyObstacle,
-)
+try:
+    from .models import (
+        DroneAction, DroneObservation, FlightPhase,
+        Position, Velocity, NearbyObstacle,
+    )
+except ImportError:
+    from models import (               # type: ignore[no-redef]
+        DroneAction, DroneObservation, FlightPhase,
+        Position, Velocity, NearbyObstacle,
+    )
 
 
 def _parse_position(d: Dict) -> Position:
@@ -84,82 +85,46 @@ def _parse_observation(payload: Dict) -> DroneObservation:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  openenv-based client (requires openenv installed)
+#  openenv-based client
 # ──────────────────────────────────────────────────────────────────────────────
 
-if _HAS_OPENENV:
-    class DroneEnv(EnvClient[DroneAction, DroneObservation, State]):
-        """
-        WebSocket client for the Drone Delivery environment.
+class DroneEnv(EnvClient[DroneAction, DroneObservation, State]):
+    """
+    WebSocket client for the Drone Delivery environment.
 
-        Example::
+    Example::
 
-            with DroneEnv(base_url="http://localhost:8000") as client:
-                result = client.reset()
-                obs = result.observation
-                print(obs.position, obs.distance_to_target)
+        with DroneEnv(base_url="http://localhost:8000") as client:
+            result = client.reset()
+            obs = result.observation
+            print(obs.position, obs.distance_to_target)
 
-                result = client.step(DroneAction(ax=1.0, ay=0.5, az=0.0))
-                print(result.observation.package_delivered)
+            result = client.step(DroneAction(ax=1.0, ay=0.5, az=0.0))
+            print(result.observation.package_delivered)
 
-        Docker example::
+    Docker example::
 
-            client = DroneEnv.from_docker_image("drone-delivery-env:latest")
-            try:
-                result = client.reset()
-                result = client.step(DroneAction(ax=0.5, ay=0.5, az=0.2))
-            finally:
-                client.close()
-        """
+        client = DroneEnv.from_docker_image("drone-delivery-env:latest")
+        try:
+            result = client.reset()
+            result = client.step(DroneAction(ax=0.5, ay=0.5, az=0.2))
+        finally:
+            client.close()
+    """
 
-        def _step_payload(self, action: DroneAction) -> Dict:
-            return {"ax": action.ax, "ay": action.ay, "az": action.az}
+    def _step_payload(self, action: DroneAction) -> Dict:
+        return {"ax": action.ax, "ay": action.ay, "az": action.az}
 
-        def _parse_result(self, payload: Dict) -> "StepResult[DroneObservation]":
-            observation = _parse_observation(payload)
-            return StepResult(
-                observation=observation,
-                reward=payload.get("reward"),
-                done=payload.get("done", False),
-            )
+    def _parse_result(self, payload: Dict) -> "StepResult[DroneObservation]":
+        observation = _parse_observation(payload)
+        return StepResult(
+            observation=observation,
+            reward=payload.get("reward"),
+            done=payload.get("done", False),
+        )
 
-        def _parse_state(self, payload: Dict) -> "State":
-            return State(
-                episode_id=payload.get("episode_id", ""),
-                step_count=payload.get("step_count", 0),
-            )
-
-else:
-    class DroneEnv:                          # type: ignore[no-redef]
-        """
-        Lightweight HTTP client (no openenv dependency).
-
-        Uses the plain REST endpoints exposed by app.py.
-        """
-        def __init__(self, base_url: str = "http://localhost:8000"):
-            self.base_url = base_url.rstrip("/")
-
-        def reset(self) -> DroneObservation:
-            r = requests.post(f"{self.base_url}/reset", timeout=10)
-            r.raise_for_status()
-            return _parse_observation(r.json())
-
-        def step(self, action: DroneAction) -> DroneObservation:
-            r = requests.post(
-                f"{self.base_url}/step",
-                json={"ax": action.ax, "ay": action.ay, "az": action.az},
-                timeout=10,
-            )
-            r.raise_for_status()
-            return _parse_observation(r.json())
-
-        def get_state(self) -> Dict:
-            r = requests.get(f"{self.base_url}/state", timeout=10)
-            r.raise_for_status()
-            return r.json()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            pass
+    def _parse_state(self, payload: Dict) -> "State":
+        return State(
+            episode_id=payload.get("episode_id", ""),
+            step_count=payload.get("step_count", 0),
+        )

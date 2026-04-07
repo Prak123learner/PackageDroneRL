@@ -47,6 +47,7 @@ from pydantic import BaseModel
 
 from environment import DroneDeliveryEnvironment
 from models import DroneAction, DroneObservation, Position, ObstacleConfig
+from grader import TASKS, list_tasks, grade_episode, TaskDefinition
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  App setup
@@ -109,6 +110,7 @@ class ResetRequest(BaseModel):
     start_position: Optional[Dict[str, float]] = None   # {"x": ..., "y": ...}
     target_position: Optional[Dict[str, float]] = None   # {"x": ..., "y": ...}
     obstacles: Optional[list] = None                     # list of ObstacleConfig dicts
+    task_id: Optional[str] = None                        # grading task identifier
 
 
 def _obs_to_dict(obs: DroneObservation) -> Dict[str, Any]:
@@ -207,7 +209,7 @@ async def reset(
     Optionally override ``world_size``, ``num_obstacles``, ``seed``,
     ``start_position``, ``target_position``, or provide custom ``obstacles``.
     """
-    if body.world_size or body.num_obstacles or body.seed is not None:
+    if body.world_size is not None or body.num_obstacles is not None or body.seed is not None:
         # Create / replace session with custom settings
         _sessions[session_id] = DroneDeliveryEnvironment(
             world_size=body.world_size or DroneDeliveryEnvironment.WORLD_SIZE,
@@ -216,6 +218,18 @@ async def reset(
         )
 
     env = _get_env(session_id)
+
+    # If a task_id is provided, use it to configure everything
+    if body.task_id:
+        if body.task_id not in TASKS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown task_id '{body.task_id}'. Available: {list(TASKS.keys())}",
+            )
+        task = TASKS[body.task_id]
+        obs = env.reset_from_task(task)
+        # Fetch obstacles for response
+        return JSONResponse(_obs_to_dict(obs))
 
     # Build optional kwargs for reset()
     reset_kwargs: Dict[str, Any] = {}
@@ -428,6 +442,37 @@ async def get_obstacles(
             for obs in env._obstacles
         ]
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Grading endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/tasks", tags=["Grading"])
+async def get_tasks():
+    """List all available grading tasks with difficulty levels."""
+    return {"tasks": list_tasks()}
+
+
+@app.get("/grade", tags=["Grading"])
+async def grade(
+    session_id: str = Query(default=_DEFAULT_SESSION, description="Session UUID"),
+):
+    """
+    Grade the current (completed) episode.
+
+    Returns a score in [0.0, 1.0] with component breakdown.
+    Must be called after the episode is done.
+    """
+    if session_id not in _sessions:
+        raise HTTPException(status_code=400, detail="Session not found.")
+    env = _sessions[session_id]
+    if not env._done:
+        raise HTTPException(
+            status_code=400,
+            detail="Episode not done yet. Run until done=true, then call /grade.",
+        )
+    return env.grade()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

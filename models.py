@@ -30,16 +30,9 @@ from pydantic import BaseModel, Field
 
 
 # ─────────────────────────────────────────────
-#  Action / Observation base shims
-#  (used when openenv is not installed)
+#  Action / Observation base types (openenv)
 # ─────────────────────────────────────────────
-try:
-    from openenv.core.env_server.types import Action, Observation
-except ImportError:
-    class Action(BaseModel):        # type: ignore[no-redef]
-        pass
-    class Observation(BaseModel):   # type: ignore[no-redef]
-        pass
+from openenv.core.env_server.types import Action, Observation
 
 
 # ─────────────────────────────────────────────

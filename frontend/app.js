@@ -19,6 +19,9 @@
   const numObsInput   = $('num-obstacles');
   const seedInput     = $('seed');
 
+  // Acceleration sliders
+  const axSlider = $('ax'), aySlider = $('ay'), azSlider = $('az');
+  const axVal = $('ax-val'), ayVal = $('ay-val'), azVal = $('az-val');
 
 
   // Buttons
@@ -89,6 +92,7 @@
   let isRunning = false;
   let currentObs = null;         // latest DroneObservation from API
   let allObstacles = [];         // full obstacle list (from /obstacles)
+  let customObstacles = [];      // user-defined obstacles for reset
   let rewardHistory = [];
   let totalRewardAcc = 0;
 
@@ -182,7 +186,7 @@
 
     // Overlay HUD
     overlayEpisode.textContent = `Episode: ${(obs.metadata?.episode_id || '—').slice(0, 8)}`;
-    overlayStep.textContent = `Step: ${obs.metadata?.step || 0} / 2000`;
+    overlayStep.textContent = `Step: ${obs.metadata?.step || 0} / ${(obs.metadata?.step || 0) + (obs.steps_remaining ?? 2000)}`;
     overlayReward.textContent = `Reward: ${fmt(obs.metadata?.total_reward)}`;
     overlayDist.textContent = `Dist: ${fmt(obs.distance_to_target, 1)}m`;
     overlayAlt.textContent = `Alt: ${fmt(pos.z, 1)}m`;
@@ -322,6 +326,21 @@
       };
       if (seedVal !== '') body.seed = parseInt(seedVal);
 
+      // Send custom start / target positions
+      const sx = parseFloat(startX.value), sy = parseFloat(startY.value);
+      const ex = parseFloat(endX.value),   ey = parseFloat(endY.value);
+      if (!isNaN(sx) && !isNaN(sy)) body.start_position = { x: sx, y: sy };
+      if (!isNaN(ex) && !isNaN(ey)) body.target_position = { x: ex, y: ey };
+
+      // Send custom obstacles if any
+      if (customObstacles.length > 0) {
+        body.obstacles = customObstacles.map(o => ({
+          x: o.x, y: o.y, height: o.height,
+          size_x: o.size_x || 2, size_y: o.size_y || 2,
+          obstacle_type: o.obstacle_type || 'building',
+        }));
+      }
+
       const obs = await api('POST', '/reset', body);
 
       // Fetch full obstacle list for accurate 3D rendering
@@ -331,6 +350,7 @@
         renderer.updateObstacles(allObstacles);
       } catch {
         allObstacles = [];
+        renderer.updateObstacles([]);
       }
 
       renderer.clearTrail();
@@ -341,91 +361,22 @@
       overlayStatus.classList.remove('show', 'delivered', 'collision', 'oob');
 
       updateUI(obs);
-      toast('🔄 Episode reset – new environment generated', 'success');
+      const obsCount = customObstacles.length > 0
+        ? `${customObstacles.length} custom`
+        : `${body.num_obstacles} random`;
+      toast(`🔄 Reset – ${obsCount} obstacles, start (${sx||'~'},${sy||'~'}) → target (${ex||'~'},${ey||'~'})`, 'success');
     } catch (e) {
       toast(`Reset failed: ${e.message}`, 'error');
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  //  Autopilot policy (frontend-side) for visualization demo
-  // ────────────────────────────────────────────────────────────────────────
-  function computeAutopilotAction() {
-    if (!currentObs) return { ax: 0, ay: 0, az: 5.0 };
-
-    const phase = currentObs.flight_phase || 'GROUND';
-    const pos = currentObs.position || {};
-    const vel = currentObs.velocity || {};
-    const td = currentObs.target_direction || [0, 0, 0];
-    const tp = currentObs.target_position || {};
-    const cruiseAlt = currentObs.cruise_altitude || 15;
-    const wp = currentObs.next_waypoint;
-
-    let ax = 0, ay = 0, az = 0;
-
-    if (phase === 'GROUND') {
-      // Pure vertical lift-off
-      az = 5.0;
-
-    } else if (phase === 'LIFTING') {
-      // Climb + gentle horizontal nudge
-      const altError = cruiseAlt - (pos.z || 0);
-      az = Math.min(Math.max(altError * 2.0, 0), 4.0);
-      ax = td[0] * 1.0;
-      ay = td[1] * 1.0;
-
-    } else if (phase === 'CRUISING') {
-      // Steer toward waypoint or target
-      let dx = td[0], dy = td[1];
-      if (wp) {
-        const ddx = wp.x - pos.x, ddy = wp.y - pos.y;
-        const mag = Math.sqrt(ddx * ddx + ddy * ddy) + 1e-8;
-        dx = ddx / mag;
-        dy = ddy / mag;
-      }
-      ax = dx * 3.5;
-      ay = dy * 3.5;
-      // Altitude hold
-      const altError = cruiseAlt - (pos.z || 0);
-      az = Math.min(Math.max(altError * 2.0, -5), 5);
-
-      // Obstacle avoidance
-      const nearby = currentObs.nearby_obstacles || [];
-      if (nearby.length > 0 && nearby[0].distance < 8.0) {
-        const n = nearby[0];
-        const strength = Math.max(0, (8.0 - n.distance) / 8.0) * 5.0;
-        ax -= (n.relative_x / (n.distance + 0.001)) * strength;
-        ay -= (n.relative_y / (n.distance + 0.001)) * strength;
-      }
-
-    } else if (phase === 'DESCENDING') {
-      // Steer toward landing position
-      const dx = (tp.x || 0) - (pos.x || 0);
-      const dy = (tp.y || 0) - (pos.y || 0);
-      const hdist = Math.sqrt(dx * dx + dy * dy) + 1e-8;
-      ax = (dx / hdist) * 2.0;
-      ay = (dy / hdist) * 2.0;
-      az = (pos.z || 0) > 1.0 ? -2.0 : -0.5;
-
-      // Brake horizontally when very close
-      if (hdist < 2.0) {
-        ax = -(vel.vx || 0) * 3.0;
-        ay = -(vel.vy || 0) * 3.0;
-      }
-    }
-
-    // Clamp to [-5, 5]
-    ax = Math.min(5, Math.max(-5, ax));
-    ay = Math.min(5, Math.max(-5, ay));
-    az = Math.min(5, Math.max(-5, az));
-
-    return { ax, ay, az };
-  }
-
   async function doStep() {
     try {
-      // Compute autopilot action from current observation
-      const body = computeAutopilotAction();
+      const body = {
+        ax: parseFloat(axSlider.value) || 0,
+        ay: parseFloat(aySlider.value) || 0,
+        az: parseFloat(azSlider.value) || 0,
+      };
       const obs = await api('POST', '/step', body);
 
       // Track obstacles from nearby observations (AABB version)
@@ -480,7 +431,7 @@
     btnReset.disabled = true;
     const fps = parseInt(simSpeedSlider.value) || 10;
     autoInterval = setInterval(doStep, 1000 / fps);
-    toast(`▶ Auto-pilot started at ${fps} steps/s`, 'info');
+    toast(`▶ Auto-run started at ${fps} steps/s`, 'info');
   }
 
   function stopAutoRun() {
@@ -490,10 +441,75 @@
     btnAuto.disabled = false;
     btnStop.disabled = true;
     btnReset.disabled = false;
-    toast('⏹ Auto-pilot stopped', 'info');
+    toast('⏹ Auto-run stopped', 'info');
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  //  Slider updates
+  // ────────────────────────────────────────────────────────────────────────
+  function setupSlider(slider, output) {
+    const update = () => { output.textContent = parseFloat(slider.value).toFixed(1); };
+    slider.addEventListener('input', update);
+    update();
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  //  Quick-preset chips
+  // ────────────────────────────────────────────────────────────────────────
+  function setupChips() {
+    document.querySelectorAll('.chip[data-ax]').forEach(chip => {
+      chip.addEventListener('click', () => {
+        axSlider.value = chip.dataset.ax;
+        aySlider.value = chip.dataset.ay;
+        azSlider.value = chip.dataset.az;
+        axVal.textContent = parseFloat(chip.dataset.ax).toFixed(1);
+        ayVal.textContent = parseFloat(chip.dataset.ay).toFixed(1);
+        azVal.textContent = parseFloat(chip.dataset.az).toFixed(1);
+      });
+    });
   }
 
 
+  // ────────────────────────────────────────────────────────────────────────
+  //  Custom obstacle editor
+  // ────────────────────────────────────────────────────────────────────────
+  function setupObstacleEditor() {
+    const addBtn = $('btn-add-obstacle');
+    const listEl = $('custom-obstacles-list');
+    if (!addBtn || !listEl) return;
+
+    addBtn.addEventListener('click', () => {
+      const ox = parseFloat($('obs-x')?.value) || 100;
+      const oy = parseFloat($('obs-y')?.value) || 100;
+      const oh = parseFloat($('obs-h')?.value) || 15;
+      const ot = $('obs-type')?.value || 'building';
+      customObstacles.push({ x: ox, y: oy, height: oh, obstacle_type: ot });
+      renderObstacleEditor();
+    });
+  }
+
+  function renderObstacleEditor() {
+    const listEl = $('custom-obstacles-list');
+    if (!listEl) return;
+    if (customObstacles.length === 0) {
+      listEl.innerHTML = '<span class="muted">No custom obstacles – will use random</span>';
+      return;
+    }
+    listEl.innerHTML = customObstacles.map((o, i) => `
+      <div class="obs-item" data-idx="${i}">
+        <span class="obs-type">${o.obstacle_type}</span>
+        <span class="obs-dist">(${o.x}, ${o.y}) h=${o.height}m</span>
+        <span class="obs-remove" data-idx="${i}" style="color:var(--rose);cursor:pointer;margin-left:auto">✕</span>
+      </div>
+    `).join('');
+    listEl.querySelectorAll('.obs-remove').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        customObstacles.splice(parseInt(btn.dataset.idx), 1);
+        renderObstacleEditor();
+      });
+    });
+  }
 
   // ────────────────────────────────────────────────────────────────────────
   //  View mode buttons
@@ -539,6 +555,22 @@
           break;
         case 'a': startAutoRun(); break;
         case 's': stopAutoRun(); break;
+        case 'ArrowUp':
+          azSlider.value = Math.min(5, parseFloat(azSlider.value) + 0.5);
+          azVal.textContent = parseFloat(azSlider.value).toFixed(1);
+          break;
+        case 'ArrowDown':
+          azSlider.value = Math.max(-5, parseFloat(azSlider.value) - 0.5);
+          azVal.textContent = parseFloat(azSlider.value).toFixed(1);
+          break;
+        case 'ArrowRight':
+          axSlider.value = Math.min(5, parseFloat(axSlider.value) + 0.5);
+          axVal.textContent = parseFloat(axSlider.value).toFixed(1);
+          break;
+        case 'ArrowLeft':
+          axSlider.value = Math.max(-5, parseFloat(axSlider.value) - 0.5);
+          axVal.textContent = parseFloat(axSlider.value).toFixed(1);
+          break;
       }
     });
   }
@@ -550,6 +582,18 @@
     // Create renderer
     const canvas = $('drone-canvas');
     renderer = new DroneRenderer(canvas);
+
+    // Sliders
+    setupSlider(axSlider, axVal);
+    setupSlider(aySlider, ayVal);
+    setupSlider(azSlider, azVal);
+
+    // Chips
+    setupChips();
+
+    // Obstacle editor
+    setupObstacleEditor();
+    renderObstacleEditor();
 
     // View buttons
     setupViewButtons();
@@ -575,7 +619,7 @@
       checkConnection();
     });
 
-    toast('🚁 Drone Delivery Simulator v2.0 ready – click Reset to start', 'info', 4000);
+    toast('🚁 Drone Delivery Simulator v2.0 ready – use sliders or arrow keys to control', 'info', 5000);
   }
 
   // Boot

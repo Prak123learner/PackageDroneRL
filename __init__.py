@@ -5,6 +5,10 @@ from .models import (
     DroneAction, DroneObservation, FlightPhase,
     Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
 )
+from .grader import (
+    TASKS, TaskDefinition, EpisodeResult,
+    grade_episode, list_tasks,
+)
 from .client import DroneEnv
 
 __all__ = [
@@ -18,4 +22,9 @@ __all__ = [
     "NearbyObstacle",
     "ObstacleConfig",
     "DroneEnv",
+    "TASKS",
+    "TaskDefinition",
+    "EpisodeResult",
+    "grade_episode",
+    "list_tasks",
 ]

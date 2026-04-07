@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.git/
+.gitignore
+*.egg-info/
+dist/
+build/
+.agents/
+.gemini/

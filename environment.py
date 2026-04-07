@@ -50,7 +50,7 @@ import math
 import heapq
 import random
 from uuid import uuid4
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
@@ -60,11 +60,13 @@ try:
         DroneAction, DroneObservation, FlightPhase,
         Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
     )
+    from .grader import EpisodeResult, TaskDefinition, TASKS, grade_episode
 except ImportError:
     from models import (               # type: ignore[no-redef]
         DroneAction, DroneObservation, FlightPhase,
         Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
     )
+    from grader import EpisodeResult, TaskDefinition, TASKS, grade_episode  # type: ignore[no-redef]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -262,7 +264,10 @@ class DroneDeliveryEnvironment(Environment):
     COLLISION_PENALTY:    float = -100.0
     OOB_PENALTY:          float =  -50.0
     PROGRESS_SCALE:       float =   1.0
+    HEADING_BONUS:        float =   0.3   # bonus for velocity aligned toward target
+    ALT_PENALTY:          float =  -0.2   # penalty for wrong altitude per phase
     NEAR_MISS_BONUS:      float =   0.3   # bonus for flying near obstacles without colliding
+    LANDING_BONUS:        float =   5.0   # bonus for smooth, slow landing
     LIVING_PENALTY:       float =  -0.1
     PATH_BONUS:           float =   0.5   # bonus per step on A* path corridor
 
@@ -289,7 +294,10 @@ class DroneDeliveryEnvironment(Environment):
         self._oob = False
         self._delivered = False
         self._prev_dist = 0.0
+        self._initial_dist = 0.0
         self._total_reward = 0.0
+        self._delivery_radius = self.DELIVERY_RADIUS  # can be overridden per task
+        self._max_steps = self.MAX_STEPS  # instance-level budget (overridden by tasks)
         self._flight_phase = FlightPhase.GROUND
         self._cruise_altitude = self.MIN_CRUISE_ALT
         self._state = State(episode_id=str(uuid4()), step_count=0)
@@ -359,16 +367,10 @@ class DroneDeliveryEnvironment(Environment):
 
         self._cruise_altitude = self._compute_cruise_altitude()
         self._prev_dist = self._dist_to_target()
+        self._initial_dist = self._prev_dist   # save for grader normalisation
         self._plan_path()
 
         return self._make_observation(reward=0.0)
-
-    # ── Autopilot constants (used by baseline policy in example_usage.py) ──
-    LIFT_ACCEL:      float = 4.0   # m/s² – upward thrust during GROUND/LIFTING
-    CRUISE_ACCEL:    float = 3.5   # m/s² – horizontal thrust toward waypoint
-    ALT_HOLD_GAIN:   float = 2.0   # proportional gain for altitude hold
-    DESCEND_ACCEL:   float = 2.5   # m/s² – descent thrust toward landing spot
-    APPROACH_ACCEL:  float = 1.5   # m/s² – gentle horizontal correction on descent
 
     def step(self, action: DroneAction) -> DroneObservation:  # type: ignore[override]
         """Apply the agent's thrust commands, integrate physics, update flight phase, compute reward."""
@@ -432,7 +434,7 @@ class DroneDeliveryEnvironment(Environment):
         self._collision = self._check_collision()
         self._delivered = (
             self._flight_phase == FlightPhase.LANDED
-            or (self._dist_to_target() <= self.DELIVERY_RADIUS and self._pos.z <= 1.0)
+            or (self._dist_to_target() <= self._delivery_radius and self._pos.z <= 1.0)
         )
 
         if self._oob:
@@ -444,108 +446,102 @@ class DroneDeliveryEnvironment(Environment):
         elif self._delivered:
             self._flight_phase = FlightPhase.LANDED
             reward += self.DELIVERY_REWARD
+            # Smooth landing bonus: reward low speed at delivery
+            speed = math.sqrt(self._vel.vx**2 + self._vel.vy**2 + self._vel.vz**2)
+            if speed < 2.0:
+                reward += self.LANDING_BONUS * (1.0 - speed / 2.0)
             self._done = True
         else:
-            # progress shaping
+            # ── progress shaping (Euclidean distance to target) ──
             curr_dist = self._dist_to_target()
             progress = self._prev_dist - curr_dist
             reward += progress * self.PROGRESS_SCALE
             self._prev_dist = curr_dist
 
-            # path-following bonus
+            # ── heading alignment bonus ──
+            # Reward when velocity vector points toward the target
+            speed = math.sqrt(self._vel.vx**2 + self._vel.vy**2 + self._vel.vz**2)
+            if speed > 0.5:
+                td = self._target_direction()
+                dot = (
+                    self._vel.vx * td[0] +
+                    self._vel.vy * td[1] +
+                    self._vel.vz * td[2]
+                ) / speed
+                # dot in [-1, 1]; only reward positive alignment
+                if dot > 0:
+                    reward += self.HEADING_BONUS * dot
+
+            # ── altitude management ──
+            if self._flight_phase == FlightPhase.CRUISING:
+                alt_error = abs(self._pos.z - self._cruise_altitude)
+                if alt_error > 3.0:  # more than 3m off cruise altitude
+                    reward += self.ALT_PENALTY  # encourages altitude hold
+            elif self._flight_phase == FlightPhase.GROUND:
+                if self._pos.z < 0.5 and az > 0:  # trying to lift -> small encouragement
+                    reward += 0.05
+
+            # ── path-following bonus ──
             if self._on_path_corridor():
                 reward += self.PATH_BONUS
 
-            # near-miss navigation bonus – reward skilful flying near obstacles
+            # ── near-miss navigation bonus ──
             if self._flight_phase in (FlightPhase.CRUISING, FlightPhase.DESCENDING):
                 for obs in self._obstacles:
                     dist = _aabb_point_distance(obs, self._pos.x, self._pos.y, self._pos.z)
                     if self.DRONE_RADIUS < dist < self.DRONE_RADIUS + 3.0:
-                        # Close but safe – bonus proportional to closeness
                         reward += self.NEAR_MISS_BONUS * (1.0 - dist / (self.DRONE_RADIUS + 3.0))
-                        break  # only count the closest one
+                        break
 
         # max-step timeout
-        if self._state.step_count >= self.MAX_STEPS:
+        if self._state.step_count >= self._max_steps:
             self._done = True
 
         self._total_reward += reward
         return self._make_observation(reward=reward)
 
-    def _compute_autopilot_acceleration(self) -> Tuple[float, float, float]:
+    def grade(self) -> Dict:
         """
-        Compute deterministic acceleration based on the current flight phase.
+        Grade the completed episode.
 
-        GROUND / LIFTING  – thrust upward to reach cruise altitude; minimal XY.
-        CRUISING          – steer horizontally toward the next A* waypoint (or
-                            target) while holding cruise altitude via P-control.
-        DESCENDING        – glide down toward the landing position.
-        LANDED            – zero thrust.
+        Returns a dict with ``score`` in [0.0, 1.0] and component scores.
+        Must be called after the episode is done (``self._done == True``).
         """
-        phase = self._flight_phase
+        speed = math.sqrt(
+            self._vel.vx ** 2 + self._vel.vy ** 2 + self._vel.vz ** 2
+        )
+        result = EpisodeResult(
+            delivered=self._delivered,
+            collision=self._collision,
+            out_of_bounds=self._oob,
+            timed_out=(self._state.step_count >= self._max_steps and not self._delivered),
+            final_dist=self._dist_to_target(),
+            initial_dist=self._initial_dist,
+            steps_used=self._state.step_count,
+            max_steps=self._max_steps,
+            total_reward=self._total_reward,
+            landing_speed=speed if self._delivered else 0.0,
+            delivery_radius=self._delivery_radius,
+        )
+        return grade_episode(result)
 
-        if phase == FlightPhase.GROUND:
-            # Pure vertical lift-off, no horizontal
-            return (0.0, 0.0, self.LIFT_ACCEL)
-
-        if phase == FlightPhase.LIFTING:
-            # Strong upward thrust + gentle drift toward target direction
-            alt_error = self._cruise_altitude - self._pos.z
-            az = self._clamp(alt_error * self.ALT_HOLD_GAIN, 0.0, self.LIFT_ACCEL)
-
-            # Light horizontal nudge toward the first waypoint / target
-            dx, dy, _ = self._waypoint_direction()
-            nudge = self.CRUISE_ACCEL * 0.3  # 30 % of cruise thrust
-            return (dx * nudge, dy * nudge, az)
-
-        if phase == FlightPhase.CRUISING:
-            # ── horizontal: steer toward next waypoint ──
-            dx, dy, _ = self._waypoint_direction()
-            ax = dx * self.CRUISE_ACCEL
-            ay = dy * self.CRUISE_ACCEL
-
-            # ── vertical: P-controller to hold cruise altitude ──
-            alt_error = self._cruise_altitude - self._pos.z
-            az = self._clamp(alt_error * self.ALT_HOLD_GAIN,
-                             -self.MAX_ACCEL, self.MAX_ACCEL)
-            return (ax, ay, az)
-
-        if phase == FlightPhase.DESCENDING:
-            # Steer toward the landing position (target at z=0)
-            dx = self._target.x - self._pos.x
-            dy = self._target.y - self._pos.y
-            dz = self._target.z - self._pos.z   # target.z is 0
-            hdist = math.sqrt(dx * dx + dy * dy) + 1e-8
-
-            # Horizontal correction
-            ax = (dx / hdist) * self.APPROACH_ACCEL
-            ay = (dy / hdist) * self.APPROACH_ACCEL
-
-            # Controlled descent – proportional to current altitude
-            az = self._clamp(dz * self.ALT_HOLD_GAIN,
-                             -self.DESCEND_ACCEL, 0.0)
-            return (ax, ay, az)
-
-        # LANDED – no thrust
-        return (0.0, 0.0, 0.0)
-
-    def _waypoint_direction(self) -> Tuple[float, float, float]:
+    def reset_from_task(self, task: TaskDefinition) -> DroneObservation:
         """
-        Unit vector toward the current A* waypoint, or toward the target
-        if no path exists.
-        """
-        wp = self._current_waypoint()
-        if wp is not None:
-            dx = wp.x - self._pos.x
-            dy = wp.y - self._pos.y
-            dz = wp.z - self._pos.z
-        else:
-            dx = self._target.x - self._pos.x
-            dy = self._target.y - self._pos.y
-            dz = self._target.z - self._pos.z
+        Reset the environment using a TaskDefinition.
 
-        mag = math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-8
-        return (dx / mag, dy / mag, dz / mag)
+        Overrides world_size, delivery_radius, max_steps, positions,
+        and obstacles from the task spec — ensures reproducibility.
+        """
+        self._world_size = task.world_size
+        self._delivery_radius = task.delivery_radius
+        self._max_steps = task.max_steps
+        self._rng = random.Random(task.seed)
+
+        return self.reset(
+            start_pos=Position(x=task.start[0], y=task.start[1], z=0),
+            target_pos=Position(x=task.target[0], y=task.target[1], z=0),
+            custom_obstacles=task.custom_obstacles if task.custom_obstacles else [],
+        )
 
     @property
     def state(self) -> State:
@@ -584,7 +580,7 @@ class DroneDeliveryEnvironment(Environment):
                 self._flight_phase = FlightPhase.DESCENDING
 
         elif phase == FlightPhase.DESCENDING:
-            if self._dist_to_target() <= self.DELIVERY_RADIUS and self._pos.z <= 1.0:
+            if self._dist_to_target() <= self._delivery_radius and self._pos.z <= 1.0:
                 self._flight_phase = FlightPhase.LANDED
             elif self._horizontal_dist_to_target() > self.HORIZONTAL_CLOSE * 2:
                 # Drifted too far away, go back to cruising
@@ -824,7 +820,7 @@ class DroneDeliveryEnvironment(Environment):
             package_delivered=self._delivered,
             collision_occurred=self._collision,
             out_of_bounds=self._oob,
-            steps_remaining=self.MAX_STEPS - self._state.step_count,
+            steps_remaining=self._max_steps - self._state.step_count,
             next_waypoint=wp,
             path_length=remaining_path,
             done=self._done,
