@@ -1,0 +1,290 @@
+name: package-drone-delivery
+version: "2.0.0"
+description: >
+  A complete OpenEnv environment where an AI agent controls a delivery drone
+  in a 3-D physics-based simulation. The drone must navigate from a start
+  position to a delivery target while avoiding AABB obstacles, managing
+  flight phases (GROUND → LIFTING → CRUISING → DESCENDING → LANDED), and
+  optimising for delivery success, efficiency, and smooth landing under
+  real-world constraints including drag, speed limits, and step budgets.
+author: "School of Technology Hackathon Team"
+license: MIT
+tags:
+  - drone-delivery
+  - reinforcement-learning
+  - 3d-navigation
+  - physics-simulation
+  - openenv
+  - fastapi
+  - meta-hackathon
+
+environment:
+  class: DroneDeliveryEnvironment
+  module: environment
+  spec_version: "1.0"
+
+tasks:
+  - id: clear_sky
+    difficulty: easy
+    max_steps: 500
+    world_size: 100.0
+    num_obstacles: 0
+    delivery_radius: 3.0
+    target_score: [0.7, 1.0]
+    description: >
+      Short flight over flat terrain with no obstacles.
+      Tests basic takeoff → cruise → land.
+
+  - id: suburbs
+    difficulty: medium
+    max_steps: 800
+    world_size: 150.0
+    num_obstacles: 6
+    delivery_radius: 2.5
+    target_score: [0.4, 0.7]
+    description: >
+      Medium distance with scattered obstacles.
+      Tests navigation and basic avoidance.
+
+  - id: downtown
+    difficulty: hard
+    max_steps: 1500
+    world_size: 200.0
+    num_obstacles: 15
+    delivery_radius: 2.0
+    target_score: [0.25, 0.5]
+    description: >
+      Long flight through a dense urban grid.
+      Tall buildings force sophisticated path planning.
+
+  - id: precision_drop
+    difficulty: hard
+    max_steps: 1000
+    world_size: 150.0
+    num_obstacles: 5
+    delivery_radius: 0.8
+    target_score: [0.2, 0.5]
+    description: >
+      Medium distance but extremely tight landing radius (0.8 m).
+      Tests fine control and precision descent.
+
+  - id: gauntlet
+    difficulty: expert
+    max_steps: 1200
+    world_size: 200.0
+    num_obstacles: 25
+    delivery_radius: 0.6
+    target_score: [0.1, 0.35]
+    description: >
+      Maximum distance through 25 obstacles with a tiny delivery zone
+      and limited step budget. Genuinely challenges frontier models.
+
+api:
+  framework: fastapi
+  endpoints:
+    - path: /reset
+      method: POST
+      description: Reset environment and return first observation
+    - path: /step
+      method: POST
+      description: Submit acceleration action and advance one timestep
+    - path: /state
+      method: GET
+      description: Return full internal environment state (no simulation advance)
+    - path: /tasks
+      method: GET
+      description: List all grading tasks with difficulty levels
+    - path: /grade
+      method: GET
+      description: Return grader score after episode completion
+    - path: /info
+      method: GET
+      description: Return environment constants and hyper-parameters
+    - path: /render
+      method: GET
+      description: ASCII projection of the world (top-down or side view)
+    - path: /obstacles
+      method: GET
+      description: Full obstacle list with absolute positions and AABB dimensions
+    - path: /health
+      method: GET
+      description: Liveness probe — returns 200 when server is up
+    - path: /sessions
+      method: GET
+      description: List all active session IDs
+    - path: /sessions/{session_id}
+      method: DELETE
+      description: Remove a session from memory
+
+observation_space:
+  type: dict
+  fields:
+    position:
+      type: dict
+      description: "Current drone position {x, y, z} in metres"
+    velocity:
+      type: dict
+      description: "Current drone velocity {vx, vy, vz} in m/s"
+    acceleration:
+      type: dict
+      description: "Acceleration applied this step {vx, vy, vz} in m/s²"
+    flight_phase:
+      type: string
+      enum: [GROUND, LIFTING, CRUISING, DESCENDING, LANDED]
+      description: "Current flight phase of the drone"
+    cruise_altitude:
+      type: float
+      description: "Dynamic cruise altitude computed from obstacle heights (m)"
+    target_position:
+      type: dict
+      description: "Package delivery target {x, y, z}"
+    distance_to_target:
+      type: float
+      description: "Euclidean distance to target (m)"
+    horizontal_distance_to_target:
+      type: float
+      description: "XY-plane distance to target (m)"
+    target_direction:
+      type: list
+      description: "Unit vector [3] pointing towards the target"
+    nearby_obstacles:
+      type: list
+      description: "Obstacles within 25 m sensor range, sorted by distance"
+    min_obstacle_distance:
+      type: float
+      description: "Distance to the nearest obstacle (m)"
+    next_waypoint:
+      type: dict
+      optional: true
+      description: "Next waypoint on the A* optimal path (null if no path found)"
+    path_length:
+      type: int
+      description: "Remaining number of waypoints on the A* path"
+    steps_remaining:
+      type: int
+      description: "Steps until episode timeout"
+    package_delivered:
+      type: bool
+      description: "Whether the package was delivered"
+    collision_occurred:
+      type: bool
+      description: "Whether the drone collided with an obstacle"
+    out_of_bounds:
+      type: bool
+      description: "Whether the drone left world bounds"
+    done:
+      type: bool
+      description: "Whether the episode has ended"
+    reward:
+      type: float
+      description: "Per-step reward signal"
+
+action_space:
+  type: dict
+  fields:
+    ax:
+      type: float
+      range: [-5.0, 5.0]
+      description: "Acceleration along X axis (m/s²)"
+    ay:
+      type: float
+      range: [-5.0, 5.0]
+      description: "Acceleration along Y axis (m/s²)"
+    az:
+      type: float
+      range: [-5.0, 5.0]
+      description: "Acceleration along Z axis (m/s²)"
+
+reward:
+  type: dict
+  fields:
+    delivery:
+      type: float
+      value: 100.0
+      description: "Reward for successfully delivering the package"
+    collision_penalty:
+      type: float
+      value: -10000.0
+      description: "Penalty for colliding with an obstacle"
+    out_of_bounds_penalty:
+      type: float
+      value: -50.0
+      description: "Penalty for leaving the world boundaries"
+    progress_reward:
+      type: float
+      scale: 1.0
+      description: "Reward proportional to distance progress toward target"
+    heading_bonus:
+      type: float
+      value: 1.0
+      description: "Bonus when velocity is aligned toward target"
+    path_bonus:
+      type: float
+      value: 0.5
+      description: "Bonus per step while on the A* path corridor"
+    near_miss_bonus:
+      type: float
+      value: 0.2
+      description: "Bonus for flying near obstacles without colliding"
+    landing_bonus:
+      type: float
+      value: 5.0
+      description: "Bonus for smooth, slow landing (speed < 2 m/s)"
+    altitude_penalty:
+      type: float
+      value: -0.2
+      description: "Penalty for deviation from cruise altitude (> 3 m)"
+    living_penalty:
+      type: float
+      value: -0.1
+      description: "Per-step cost to encourage efficiency"
+
+grading:
+  weights:
+    delivery: 0.40
+    progress: 0.25
+    efficiency: 0.15
+    safety: 0.10
+    smoothness: 0.10
+  score_range: [0.0, 1.0]
+  description: >
+    Weighted combination of delivery success, distance progress,
+    step efficiency, collision avoidance, and landing smoothness.
+
+physics:
+  timestep_s: 0.1
+  max_speed_ms: 16.67
+  max_accel_ms2: 5.0
+  drag_coefficient: 0.05
+  drone_radius_m: 0.4
+  sensor_range_m: 25.0
+  world_size_m: 200.0
+  voxel_size_m: 4.0
+  obstacle_model: "AABB (axis-aligned bounding boxes)"
+  pathfinding: "A* on a 50×50×50 voxelised 3-D grid"
+
+docker:
+  base_image: python:3.11-slim
+  port: 7860
+  health_check: /health
+
+huggingface:
+  space_sdk: docker
+  app_port: 7860
+  tags:
+    - openenv
+    - drone-delivery
+    - reinforcement-learning
+    - 3d-physics
+
+dependencies:
+  python:
+    - fastapi>=0.110.0
+    - uvicorn[standard]>=0.29.0
+    - pydantic>=2.0.0
+    - requests>=2.31.0
+    - starlette>=0.36.0
+    - openenv-core
+    - openai>=1.0.0
+
+spec_version: "0.2.0"
