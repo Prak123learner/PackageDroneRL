@@ -24,60 +24,51 @@ environment:
   spec_version: "1.0"
 
 tasks:
-  - id: clear_sky
+  - id: direct_flight
     difficulty: easy
     max_steps: 500
     world_size: 100.0
     num_obstacles: 0
-    delivery_radius: 3.0
+    delivery_radius: 5.0
     target_score: [0.7, 1.0]
     description: >
-      Short flight over flat terrain with no obstacles.
-      Tests basic takeoff → cruise → land.
+      Move directly towards the target along the ground.
+      No obstacles, no liftoff required. Tests basic navigation.
 
-  - id: suburbs
+  - id: vertical_mission
     difficulty: medium
-    max_steps: 800
-    world_size: 150.0
-    num_obstacles: 6
-    delivery_radius: 2.5
+    max_steps: 1000
+    world_size: 200.0
+    num_obstacles: 0
+    delivery_radius: 3.0
     target_score: [0.4, 0.7]
     description: >
-      Medium distance with scattered obstacles.
-      Tests navigation and basic avoidance.
+      Lift off from the ground, cruise at altitude towards the target,
+      descend and land. No obstacles. Tests full flight phase control.
 
-  - id: downtown
+  - id: obstacle_course
     difficulty: hard
     max_steps: 1500
     world_size: 200.0
-    num_obstacles: 15
+    num_obstacles: 12
     delivery_radius: 2.0
     target_score: [0.25, 0.5]
     description: >
-      Long flight through a dense urban grid.
-      Tall buildings force sophisticated path planning.
+      Take off, navigate through dense obstacles (buildings, towers),
+      and land at the target. Tests pathfinding and obstacle avoidance.
 
-  - id: precision_drop
-    difficulty: hard
-    max_steps: 1000
-    world_size: 150.0
-    num_obstacles: 5
-    delivery_radius: 0.8
-    target_score: [0.2, 0.5]
-    description: >
-      Medium distance but extremely tight landing radius (0.8 m).
-      Tests fine control and precision descent.
-
-  - id: gauntlet
+  - id: storm_run
     difficulty: expert
-    max_steps: 1200
+    max_steps: 1500
     world_size: 200.0
-    num_obstacles: 25
-    delivery_radius: 0.6
+    num_obstacles: 15
+    delivery_radius: 1.5
+    wind: [2.0, 0.0, 0.0]
     target_score: [0.1, 0.35]
     description: >
-      Maximum distance through 25 obstacles with a tiny delivery zone
-      and limited step budget. Genuinely challenges frontier models.
+      Navigate through dense obstacles with constant wind (2 m/s^2 eastward)
+      pushing the drone off course. Tests wind compensation and precision.
+
 
 api:
   framework: fastapi

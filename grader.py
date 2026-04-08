@@ -6,11 +6,10 @@ and a grader that scores episode outcomes in [0.0, 1.0].
 
 Tasks
 -----
-  1. clear_sky       (Easy)   – Short distance, no obstacles
-  2. suburbs         (Medium) – Medium distance, few obstacles
-  3. downtown        (Hard)   – Full distance, dense obstacles
-  4. precision_drop  (Hard)   – Tight delivery radius, obstacles
-  5. gauntlet        (Expert) – Maximum distance, 25 obstacles, tight everything
+  1. direct_flight    (Easy)   – Ground-level direct flight, no obstacles, no liftoff
+  2. vertical_mission (Medium) – Full flight phases (takeoff → cruise → land), no obstacles
+  3. obstacle_course  (Hard)   – Full flight phases with dense obstacles requiring avoidance
+  4. storm_run        (Expert) – Obstacles + constant wind pushing the drone off course
 
 Grading
 -------
@@ -56,20 +55,28 @@ class TaskDefinition:
     custom_obstacles: List[ObstacleConfig]   # overrides random if non-empty
     delivery_radius: float                   # metres
     max_steps: int                           # episode budget
+    wind: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # constant wind accel (wx, wy, wz)
 
 
-#  Five canonical tasks with escalating challenge
+#  Four canonical tasks with escalating challenge
 TASKS: Dict[str, TaskDefinition] = {}
 
 def _register(t: TaskDefinition):
     TASKS[t.task_id] = t
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  Task 1 – EASY: Direct Flight
+# ──────────────────────────────────────────────────────────────────────────────
+#  The drone moves directly towards the target along the ground.
+#  No liftoff required, no obstacles, large delivery radius.
+#  Tests: basic navigation, acceleration control.
+
 _register(TaskDefinition(
-    task_id="clear_sky",
-    name="Clear Sky",
-    description="Short flight over flat terrain with no obstacles. "
-                "Tests basic takeoff → cruise → land.",
+    task_id="direct_flight",
+    name="Direct Flight",
+    description="Move directly towards the target along the ground. "
+                "No obstacles, no liftoff required. Tests basic navigation.",
     difficulty="easy",
     difficulty_score=0.2,
     seed=1001,
@@ -78,134 +85,119 @@ _register(TaskDefinition(
     target=(80, 80),
     num_obstacles=0,
     custom_obstacles=[],
-    delivery_radius=3.0,
+    delivery_radius=5.0,
     max_steps=500,
+    wind=(0.0, 0.0, 0.0),
 ))
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Task 2 – MEDIUM: Vertical Mission
+# ──────────────────────────────────────────────────────────────────────────────
+#  The drone must lift off, cruise at altitude, then descend and land.
+#  No obstacles but full flight phase cycle is required.
+#  Tests: takeoff, altitude hold, descent, precision landing.
+
 _register(TaskDefinition(
-    task_id="suburbs",
-    name="Suburban Delivery",
-    description="Medium distance with a handful of scattered obstacles. "
-                "Tests navigation and basic avoidance.",
+    task_id="vertical_mission",
+    name="Vertical Mission",
+    description="Lift off from the ground, cruise at altitude towards the target, "
+                "descend and land. No obstacles. Tests full flight phase control.",
     difficulty="medium",
-    difficulty_score=0.4,
+    difficulty_score=0.5,
     seed=2002,
-    world_size=150.0,
+    world_size=200.0,
     start=(10, 10),
-    target=(130, 130),
-    num_obstacles=6,
-    custom_obstacles=[
-        ObstacleConfig(x=50,  y=50,  height=8,  obstacle_type="tree"),
-        ObstacleConfig(x=70,  y=80,  height=12, obstacle_type="building"),
-        ObstacleConfig(x=90,  y=60,  height=10, obstacle_type="tower"),
-        ObstacleConfig(x=100, y=100, height=15, obstacle_type="building"),
-        ObstacleConfig(x=60,  y=110, height=6,  obstacle_type="antenna"),
-        ObstacleConfig(x=110, y=80,  height=9,  obstacle_type="tree"),
-    ],
-    delivery_radius=2.5,
-    max_steps=800,
+    target=(180, 180),
+    num_obstacles=0,
+    custom_obstacles=[],
+    delivery_radius=3.0,
+    max_steps=1000,
+    wind=(0.0, 0.0, 0.0),
 ))
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Task 3 – HARD: Obstacle Course
+# ──────────────────────────────────────────────────────────────────────────────
+#  The drone takes off, navigates through a dense urban obstacle field,
+#  and lands at the target location while avoiding collisions.
+#  Tests: pathfinding, obstacle avoidance, altitude management.
+
 _register(TaskDefinition(
-    task_id="downtown",
-    name="Downtown Corridor",
-    description="Long flight through a dense urban grid. "
-                "A corridor of tall buildings forces path planning.",
+    task_id="obstacle_course",
+    name="Obstacle Course",
+    description="Take off, navigate through dense obstacles (buildings, towers), "
+                "and land at the target. Tests pathfinding and obstacle avoidance.",
     difficulty="hard",
-    difficulty_score=0.7,
+    difficulty_score=0.75,
     seed=3003,
     world_size=200.0,
     start=(10, 10),
     target=(180, 180),
     num_obstacles=0,
     custom_obstacles=[
-        # A wall of buildings across the diagonal
+        # Diagonal wall of buildings blocking direct path
         ObstacleConfig(x=60,  y=60,  height=20,  size_x=3, size_y=3, obstacle_type="building"),
-        ObstacleConfig(x=70,  y=70,  height=18,  size_x=3, size_y=3, obstacle_type="building"),
-        ObstacleConfig(x=80,  y=80,  height=22,  size_x=3, size_y=3, obstacle_type="tower"),
-        ObstacleConfig(x=90,  y=90,  height=16,  size_x=3, size_y=3, obstacle_type="building"),
-        ObstacleConfig(x=100, y=100, height=25,  size_x=4, size_y=4, obstacle_type="tower"),
-        ObstacleConfig(x=110, y=110, height=19,  size_x=3, size_y=3, obstacle_type="building"),
-        ObstacleConfig(x=120, y=120, height=21,  size_x=3, size_y=3, obstacle_type="building"),
-        # Flanking obstacles to limit detour
-        ObstacleConfig(x=75,  y=95,  height=14, obstacle_type="antenna"),
-        ObstacleConfig(x=95,  y=75,  height=14, obstacle_type="antenna"),
-        ObstacleConfig(x=105, y=125, height=12, obstacle_type="tree"),
-        ObstacleConfig(x=125, y=105, height=12, obstacle_type="tree"),
-        ObstacleConfig(x=140, y=140, height=10, obstacle_type="building"),
-        ObstacleConfig(x=50,  y=100, height=8,  obstacle_type="tree"),
-        ObstacleConfig(x=100, y=50,  height=8,  obstacle_type="tree"),
-        ObstacleConfig(x=150, y=160, height=11, obstacle_type="antenna"),
+        ObstacleConfig(x=75,  y=75,  height=18,  size_x=3, size_y=3, obstacle_type="building"),
+        ObstacleConfig(x=90,  y=90,  height=22,  size_x=4, size_y=4, obstacle_type="tower"),
+        ObstacleConfig(x=105, y=105, height=25,  size_x=4, size_y=4, obstacle_type="tower"),
+        ObstacleConfig(x=120, y=120, height=19,  size_x=3, size_y=3, obstacle_type="building"),
+        ObstacleConfig(x=135, y=135, height=21,  size_x=3, size_y=3, obstacle_type="building"),
+        # Flanking obstacles to limit easy detours
+        ObstacleConfig(x=70,  y=100, height=14, obstacle_type="antenna"),
+        ObstacleConfig(x=100, y=70,  height=14, obstacle_type="antenna"),
+        ObstacleConfig(x=110, y=130, height=12, obstacle_type="tree"),
+        ObstacleConfig(x=130, y=110, height=12, obstacle_type="tree"),
+        ObstacleConfig(x=50,  y=90,  height=8,  obstacle_type="tree"),
+        ObstacleConfig(x=150, y=155, height=10, obstacle_type="antenna"),
     ],
     delivery_radius=2.0,
     max_steps=1500,
+    wind=(0.0, 0.0, 0.0),
 ))
 
-_register(TaskDefinition(
-    task_id="precision_drop",
-    name="Precision Drop",
-    description="Medium distance but extremely tight landing radius (0.8m). "
-                "Tests fine control and precision descent.",
-    difficulty="hard",
-    difficulty_score=0.8,
-    seed=4004,
-    world_size=150.0,
-    start=(15, 15),
-    target=(130, 130),
-    num_obstacles=0,
-    custom_obstacles=[
-        ObstacleConfig(x=60,  y=70,  height=15, obstacle_type="building"),
-        ObstacleConfig(x=80,  y=50,  height=12, obstacle_type="tower"),
-        ObstacleConfig(x=100, y=90,  height=18, size_x=3, size_y=3, obstacle_type="building"),
-        ObstacleConfig(x=70,  y=110, height=10, obstacle_type="antenna"),
-        ObstacleConfig(x=110, y=120, height=8,  obstacle_type="tree"),
-    ],
-    delivery_radius=0.8,        # very tight! must brake precisely
-    max_steps=1000,
-))
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Task 4 – EXPERT: Storm Run
+# ──────────────────────────────────────────────────────────────────────────────
+#  Everything from Hard, plus a constant wind blowing the drone off course.
+#  The agent must compensate for wind drift while navigating obstacles.
+#  Tests: wind compensation, optimal pathing under perturbation, precision.
 
 _register(TaskDefinition(
-    task_id="gauntlet",
-    name="The Gauntlet",
-    description="Maximum distance through 25 obstacles with a tiny delivery zone "
-                "and limited step budget. Genuinely challenges frontier models.",
+    task_id="storm_run",
+    name="Storm Run",
+    description="Navigate through dense obstacles with constant wind (2 m/s² eastward) "
+                "pushing the drone off course. Tests wind compensation and precision.",
     difficulty="expert",
     difficulty_score=1.0,
-    seed=5005,
+    seed=4004,
     world_size=200.0,
-    start=(5, 5),
-    target=(190, 190),
+    start=(10, 10),
+    target=(185, 185),
     num_obstacles=0,
     custom_obstacles=[
         # Dense obstacle field
-        ObstacleConfig(x=30,  y=30,  height=12, obstacle_type="building"),
-        ObstacleConfig(x=40,  y=55,  height=18, size_x=3, size_y=3, obstacle_type="tower"),
-        ObstacleConfig(x=55,  y=40,  height=15, obstacle_type="building"),
-        ObstacleConfig(x=60,  y=70,  height=22, size_x=4, size_y=4, obstacle_type="tower"),
-        ObstacleConfig(x=70,  y=55,  height=14, obstacle_type="antenna"),
-        ObstacleConfig(x=80,  y=80,  height=25, size_x=5, size_y=5, obstacle_type="building"),
-        ObstacleConfig(x=90,  y=65,  height=20, size_x=3, size_y=3, obstacle_type="tower"),
-        ObstacleConfig(x=65,  y=95,  height=16, obstacle_type="building"),
-        ObstacleConfig(x=100, y=100, height=28, size_x=5, size_y=5, obstacle_type="tower"),
-        ObstacleConfig(x=110, y=85,  height=19, obstacle_type="building"),
-        ObstacleConfig(x=85,  y=115, height=17, obstacle_type="antenna"),
-        ObstacleConfig(x=120, y=110, height=21, size_x=3, size_y=3, obstacle_type="building"),
-        ObstacleConfig(x=130, y=130, height=24, size_x=4, size_y=4, obstacle_type="tower"),
-        ObstacleConfig(x=115, y=140, height=13, obstacle_type="tree"),
-        ObstacleConfig(x=140, y=115, height=15, obstacle_type="antenna"),
-        ObstacleConfig(x=145, y=145, height=20, size_x=3, size_y=3, obstacle_type="building"),
-        ObstacleConfig(x=150, y=125, height=11, obstacle_type="tree"),
-        ObstacleConfig(x=125, y=155, height=18, obstacle_type="building"),
-        ObstacleConfig(x=160, y=150, height=16, obstacle_type="tower"),
-        ObstacleConfig(x=155, y=170, height=14, obstacle_type="antenna"),
-        ObstacleConfig(x=170, y=155, height=12, obstacle_type="tree"),
-        ObstacleConfig(x=165, y=165, height=22, size_x=4, size_y=4, obstacle_type="building"),
-        ObstacleConfig(x=175, y=175, height=10, obstacle_type="antenna"),
-        ObstacleConfig(x=50,  y=120, height=9,  obstacle_type="tree"),
-        ObstacleConfig(x=120, y=50,  height=9,  obstacle_type="tree"),
+        ObstacleConfig(x=50,  y=50,  height=15, obstacle_type="building"),
+        ObstacleConfig(x=65,  y=70,  height=20, size_x=3, size_y=3, obstacle_type="tower"),
+        ObstacleConfig(x=80,  y=55,  height=12, obstacle_type="antenna"),
+        ObstacleConfig(x=75,  y=90,  height=22, size_x=4, size_y=4, obstacle_type="tower"),
+        ObstacleConfig(x=95,  y=80,  height=18, size_x=3, size_y=3, obstacle_type="building"),
+        ObstacleConfig(x=100, y=100, height=25, size_x=5, size_y=5, obstacle_type="tower"),
+        ObstacleConfig(x=115, y=90,  height=16, obstacle_type="building"),
+        ObstacleConfig(x=90,  y=120, height=14, obstacle_type="antenna"),
+        ObstacleConfig(x=130, y=120, height=21, size_x=3, size_y=3, obstacle_type="building"),
+        ObstacleConfig(x=120, y=140, height=19, size_x=3, size_y=3, obstacle_type="tower"),
+        ObstacleConfig(x=145, y=145, height=17, obstacle_type="building"),
+        ObstacleConfig(x=155, y=130, height=11, obstacle_type="tree"),
+        ObstacleConfig(x=140, y=160, height=15, obstacle_type="antenna"),
+        ObstacleConfig(x=165, y=160, height=20, size_x=4, size_y=4, obstacle_type="building"),
+        ObstacleConfig(x=170, y=175, height=10, obstacle_type="tree"),
     ],
-    delivery_radius=0.6,        # extremely tight
-    max_steps=1200,              # tight budget for 260m+ distance
+    delivery_radius=1.5,
+    max_steps=1500,
+    wind=(2.0, 0.0, 0.0),    # constant 2 m/s² eastward wind
 ))
 
 
@@ -324,6 +316,7 @@ def list_tasks() -> List[Dict]:
             "num_obstacles": len(t.custom_obstacles) or t.num_obstacles,
             "delivery_radius": t.delivery_radius,
             "max_steps": t.max_steps,
+            "wind": list(t.wind),
         }
         for t in TASKS.values()
     ]

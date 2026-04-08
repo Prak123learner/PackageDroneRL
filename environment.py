@@ -300,6 +300,7 @@ class DroneDeliveryEnvironment(Environment):
         self._max_steps = self.MAX_STEPS  # instance-level budget (overridden by tasks)
         self._flight_phase = FlightPhase.GROUND
         self._cruise_altitude = self.MIN_CRUISE_ALT
+        self._wind = Velocity()  # constant wind acceleration (set by task)
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
     # ──────────────────────────────────────────
@@ -408,6 +409,11 @@ class DroneDeliveryEnvironment(Environment):
 
         # Store applied acceleration for observation
         self._accel = Velocity(vx=ax, vy=ay, vz=az)
+
+        # ── apply wind acceleration ──────────
+        ax += self._wind.vx
+        ay += self._wind.vy
+        az += self._wind.vz
 
         # ── integrate velocity ───────────────
         self._vel.vx = (self._vel.vx + ax * self.DT) * (1 - self.DRAG)
@@ -530,12 +536,18 @@ class DroneDeliveryEnvironment(Environment):
         Reset the environment using a TaskDefinition.
 
         Overrides world_size, delivery_radius, max_steps, positions,
-        and obstacles from the task spec — ensures reproducibility.
+        obstacles, and wind from the task spec — ensures reproducibility.
         """
         self._world_size = task.world_size
         self._delivery_radius = task.delivery_radius
         self._max_steps = task.max_steps
         self._rng = random.Random(task.seed)
+
+        # Set wind from task definition
+        if hasattr(task, 'wind') and task.wind:
+            self._wind = Velocity(vx=task.wind[0], vy=task.wind[1], vz=task.wind[2])
+        else:
+            self._wind = Velocity()
 
         return self.reset(
             start_pos=Position(x=task.start[0], y=task.start[1], z=0),
@@ -835,6 +847,11 @@ class DroneDeliveryEnvironment(Environment):
                 ),
                 "flight_phase": self._flight_phase.value,
                 "cruise_altitude": self._cruise_altitude,
+                "wind": {
+                    "wx": self._wind.vx,
+                    "wy": self._wind.vy,
+                    "wz": self._wind.vz,
+                },
             },
         )
 

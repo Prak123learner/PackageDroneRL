@@ -5,6 +5,13 @@ An LLM agent controls a 3D delivery drone through flight phases
 (GROUND → LIFTING → CRUISING → DESCENDING → LANDED) by choosing
 acceleration commands (ax, ay, az) each step.
 
+TASKS (4 difficulty tiers)
+--------------------------
+    1. direct_flight    (Easy)   – Ground-level direct movement, no obstacles
+    2. vertical_mission (Medium) – Full flight phases, takeoff → cruise → land
+    3. obstacle_course  (Hard)   – Dense obstacles, requires pathfinding + avoidance
+    4. storm_run        (Expert) – Obstacles + constant wind (2 m/s² eastward)
+
 STANDALONE: This script only requires `requests` and `openai` — no
 openenv-core or other project files needed.
 
@@ -18,6 +25,8 @@ OPTIONAL ENV VARS
                        Defaults to http://localhost:7860 (HF Spaces port).
     API_BASE_URL       LLM API endpoint (default: HF router).
     MODEL_NAME         Model identifier (default: Qwen/Qwen2.5-72B-Instruct).
+    DRONE_TASK_ID      Task to run: direct_flight | vertical_mission |
+                       obstacle_course | storm_run  (default: none / free play).
 
 STDOUT FORMAT
 -------------
@@ -49,16 +58,17 @@ API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 
 TASK_NAME = os.getenv("DRONE_TASK", "package-delivery")
+TASK_ID = os.getenv("DRONE_TASK_ID", "")  # e.g. direct_flight, vertical_mission, obstacle_course, storm_run
 BENCHMARK = os.getenv("DRONE_BENCHMARK", "drone_delivery_rl")
 MAX_STEPS = int(os.getenv("DRONE_MAX_STEPS", "500"))
 TEMPERATURE = 0.3           # lower = more deterministic flight decisions
 MAX_TOKENS = 200
 HTTP_TIMEOUT = 30           # seconds per HTTP request to the environment
 
-# Scoring: delivery = +100, progress ≈ +240, path bonus ≈ +150, living ≈ -50
+# Scoring: delivery = +100, progress ~ +240, path bonus ~ +150, living ~ -50
 # A successful delivery yields roughly +440. We normalize to [0, 1].
 MAX_TOTAL_REWARD = 450.0
-SUCCESS_SCORE_THRESHOLD = 0.3   # score ≥ 0.3 → success (drone made significant progress)
+SUCCESS_SCORE_THRESHOLD = 0.3   # score >= 0.3 -> success (drone made significant progress)
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  System prompt – tells the LLM how to fly the drone
@@ -69,25 +79,33 @@ You are an AI pilot controlling a delivery drone in a 3D physics simulation.
 
 OBJECTIVE: Fly from the start position to the delivery target, land, and deliver the package.
 
+TASKS (escalating difficulty):
+  1. EASY  (direct_flight)    - Move directly to the target along the ground. No liftoff needed.
+  2. MEDIUM (vertical_mission) - Take off, cruise at altitude, descend and land. No obstacles.
+  3. HARD  (obstacle_course)  - Full flight through dense obstacles. Requires pathfinding.
+  4. EXPERT (storm_run)       - Obstacles + constant wind (2 m/s^2) pushing you off course.
+
 FLIGHT PHASES (automatic transitions based on altitude/position):
-  GROUND     → You start here. Thrust upward (az > 0) to lift off.
-  LIFTING    → Keep climbing until you reach cruise altitude.
-  CRUISING   → Fly horizontally toward the target. Follow A* waypoints if available.
-  DESCENDING → You are near the target horizontally. Descend toward ground (az < 0).
-  LANDED     → Package delivered! Episode ends with +100 reward.
+  GROUND     - You start here. Thrust upward (az > 0) to lift off.
+  LIFTING    - Keep climbing until you reach cruise altitude.
+  CRUISING   - Fly horizontally toward the target. Follow A* waypoints if available.
+  DESCENDING - You are near the target horizontally. Descend toward ground (az < 0).
+  LANDED     - Package delivered! Episode ends with +100 reward.
 
 PHYSICS:
   - You control acceleration: ax (east-west), ay (north-south), az (up-down)
-  - Each value must be between -5.0 and +5.0 m/s²
+  - Each value must be between -5.0 and +5.0 m/s^2
   - Max speed: 16.67 m/s (60 km/h)
   - Drag slows you down naturally
   - Timestep: 0.1 seconds per step
+  - WIND: Some tasks have constant wind that pushes the drone. Compensate by
+    steering against the wind direction. Wind info is in the observation.
 
 REWARDS:
-  +100  delivery (land within 2m of target)
+  +100  delivery (land within delivery radius of target)
   -100  collision with obstacle
   -50   out of bounds
-  +Δdist progress toward target
+  +dist progress toward target
   +0.5  per step on A* path corridor
   -0.1  per step (efficiency penalty)
 
@@ -95,11 +113,13 @@ OUTPUT FORMAT: Reply with ONLY a JSON object, nothing else:
 {"ax": <float>, "ay": <float>, "az": <float>}
 
 STRATEGY HINTS:
+  - EASY: Just steer toward the target with ax/ay, keep az=0 (stay on ground)
   - GROUND: set az=5.0 to lift off quickly
   - LIFTING: keep az=3.0-4.0, gently steer toward target with small ax/ay
   - CRUISING: use target_direction or waypoint to set ax/ay (scale 3-4), hold altitude with az
   - DESCENDING: reduce az to -2.0, keep ax/ay aimed at target
-  - If obstacle is nearby (< 8m), steer away from it
+  - If obstacle is nearby (<8m), steer away from it
+  - WIND: If wind is blowing east (+wx), add negative ax to compensate
 """)
 
 
@@ -220,7 +240,7 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Observation → LLM prompt
+#  Observation -> LLM prompt
 # ──────────────────────────────────────────────────────────────────────────────
 
 def format_observation(obs: Dict, step: int, last_reward: float) -> str:
@@ -262,7 +282,7 @@ def format_observation(obs: Dict, step: int, last_reward: float) -> str:
                 f"  - {o.get('obstacle_type', 'unknown')} at distance {o.get('distance', 0):.1f}m "
                 f"(rel: x={o.get('relative_x', 0):.1f}, y={o.get('relative_y', 0):.1f}, "
                 f"z={o.get('relative_z', 0):.1f}, "
-                f"size: {o.get('size_x', 2):.0f}×{o.get('size_y', 2):.0f}×{o.get('size_z', 10):.0f})"
+                f"size: {o.get('size_x', 2):.0f}x{o.get('size_y', 2):.0f}x{o.get('size_z', 10):.0f})"
             )
         lines.append(f"Nearby Obstacles ({len(nearby)} total):")
         lines.extend(obs_strs)
@@ -270,12 +290,21 @@ def format_observation(obs: Dict, step: int, last_reward: float) -> str:
         lines.append("Nearby Obstacles: none in sensor range")
 
     lines.append("")
+
+    # Wind info
+    wind = meta.get("wind", {})
+    wx = wind.get("wx", 0)
+    wy = wind.get("wy", 0)
+    wz = wind.get("wz", 0)
+    if wx != 0 or wy != 0 or wz != 0:
+        lines.append(f"Wind: wx={wx:.1f}, wy={wy:.1f}, wz={wz:.1f} m/s^2")
+
     lines.append('Decide your acceleration. Reply with ONLY: {"ax": <float>, "ay": <float>, "az": <float>}')
     return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  LLM → action parsing
+#  LLM -> action parsing
 # ──────────────────────────────────────────────────────────────────────────────
 
 def parse_action(text: str) -> Tuple[float, float, float]:
@@ -359,7 +388,7 @@ def get_llm_action(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # ── Validate configuration ──
+    # -- Validate configuration --
     if not API_KEY:
         print("[ERROR] HF_TOKEN or API_KEY environment variable is required.", flush=True)
         sys.exit(1)
@@ -381,8 +410,11 @@ def main() -> None:
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        # Reset environment
-        obs = env.reset()
+        # Reset environment (with optional task_id)
+        reset_task = TASK_ID if TASK_ID else None
+        if reset_task:
+            print(f"[DEBUG] Using task_id: {reset_task}", flush=True)
+        obs = env.reset(task_id=reset_task)
         last_reward = 0.0
         done = obs.get("done", False)
 
@@ -415,13 +447,13 @@ def main() -> None:
             if done:
                 # Log final outcome
                 if obs.get("package_delivered", False):
-                    print(f"[DEBUG] 📦 Package delivered in {step} steps!", flush=True)
+                    print(f"[DEBUG] Package delivered in {step} steps!", flush=True)
                 elif obs.get("collision_occurred", False):
-                    print(f"[DEBUG] 💥 Collision at step {step}", flush=True)
+                    print(f"[DEBUG] Collision at step {step}", flush=True)
                 elif obs.get("out_of_bounds", False):
-                    print(f"[DEBUG] ⚠ Out of bounds at step {step}", flush=True)
+                    print(f"[DEBUG] Out of bounds at step {step}", flush=True)
                 else:
-                    print(f"[DEBUG] ⏱ Timeout at step {step}", flush=True)
+                    print(f"[DEBUG] Timeout at step {step}", flush=True)
                 break
 
         # Compute normalized score in [0, 1]
