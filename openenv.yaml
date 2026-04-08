@@ -31,6 +31,7 @@ tasks:
     num_obstacles: 0
     delivery_radius: 5.0
     target_score: [0.7, 1.0]
+    graders: [episode_score]
     description: >
       Move directly towards the target along the ground.
       No obstacles, no liftoff required. Tests basic navigation.
@@ -42,6 +43,7 @@ tasks:
     num_obstacles: 0
     delivery_radius: 3.0
     target_score: [0.4, 0.7]
+    graders: [episode_score]
     description: >
       Lift off from the ground, cruise at altitude towards the target,
       descend and land. No obstacles. Tests full flight phase control.
@@ -53,6 +55,7 @@ tasks:
     num_obstacles: 12
     delivery_radius: 2.0
     target_score: [0.25, 0.5]
+    graders: [episode_score]
     description: >
       Take off, navigate through dense obstacles (buildings, towers),
       and land at the target. Tests pathfinding and obstacle avoidance.
@@ -68,6 +71,16 @@ tasks:
     description: >
       Navigate through dense obstacles with constant wind (2 m/s^2 eastward)
       pushing the drone off course. Tests wind compensation and precision.
+
+graders:
+  - id: episode_score
+    type: endpoint
+    endpoint: /grade
+    score_field: score
+    score_range: [0.0, 1.0]
+    description: >
+      Uses the environment's /grade endpoint and reads the "score" field.
+      The implementation clamps score strictly within (0, 1).
 
 
 api:

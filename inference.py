@@ -65,6 +65,28 @@ TEMPERATURE = 0.3           # lower = more deterministic flight decisions
 MAX_TOKENS = 200
 HTTP_TIMEOUT = 30           # seconds per HTTP request to the environment
 
+# ── Task configs (mirrors environment tasks) ───────────────────────────────────
+TASKS = ["direct_flight", "vertical_mission", "obstacle_course", "storm_run"]
+
+TASK_DESCRIPTIONS = {
+    "direct_flight": (
+        "Easy: ground-level direct flight, no obstacles. "
+        "Reach target area and deliver with minimal steps."
+    ),
+    "vertical_mission": (
+        "Medium: full flight phases (takeoff → cruise → descend → land), no obstacles. "
+        "Maintain altitude control and land smoothly."
+    ),
+    "obstacle_course": (
+        "Hard: dense AABB obstacles. "
+        "Avoid collisions while navigating to target and landing within delivery radius."
+    ),
+    "storm_run": (
+        "Expert: dense obstacles + constant eastward wind acceleration. "
+        "Compensate for drift while avoiding collisions and landing precisely."
+    ),
+}
+
 # Scoring: delivery = +100, progress ~ +240, path bonus ~ +150, living ~ -50
 # A successful delivery yields roughly +440. We normalize to [0, 1].
 MAX_TOTAL_REWARD = 450.0

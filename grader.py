@@ -232,6 +232,10 @@ W_EFFICIENCY = 0.15   # step economy
 W_SAFETY     = 0.10   # collision / OOB avoidance
 W_SMOOTHNESS = 0.10   # landing quality
 
+# Some external evaluators require task scores to be strictly within (0, 1)
+# (i.e., not exactly 0.0 or 1.0).
+_STRICT_SCORE_EPS = 1e-4
+
 
 def grade_episode(result: EpisodeResult) -> Dict[str, float]:
     """
@@ -282,7 +286,10 @@ def grade_episode(result: EpisodeResult) -> Dict[str, float]:
         W_SAFETY     * safety     +
         W_SMOOTHNESS * smoothness
     )
-    score = round(min(1.0, max(0.0, score)), 4)
+    # Keep score strictly within (0, 1) for compatibility with graders that
+    # forbid boundary values.
+    score = min(1.0 - _STRICT_SCORE_EPS, max(_STRICT_SCORE_EPS, score))
+    score = round(score, 4)
 
     return {
         "score": score,
