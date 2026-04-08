@@ -261,12 +261,12 @@ class DroneDeliveryEnvironment(Environment):
 
     # ── Reward shaping ───────────────────────
     DELIVERY_REWARD:      float =  100.0
-    COLLISION_PENALTY:    float = -100.0
+    COLLISION_PENALTY:    float = -10000.0
     OOB_PENALTY:          float =  -50.0
     PROGRESS_SCALE:       float =   1.0
-    HEADING_BONUS:        float =   0.3   # bonus for velocity aligned toward target
+    HEADING_BONUS:        float =   1.0   # bonus for velocity aligned toward target
     ALT_PENALTY:          float =  -0.2   # penalty for wrong altitude per phase
-    NEAR_MISS_BONUS:      float =   0.3   # bonus for flying near obstacles without colliding
+    NEAR_MISS_BONUS:      float =   0.2   # bonus for flying near obstacles without colliding
     LANDING_BONUS:        float =   5.0   # bonus for smooth, slow landing
     LIVING_PENALTY:       float =  -0.1
     PATH_BONUS:           float =   0.5   # bonus per step on A* path corridor
