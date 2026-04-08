@@ -60,13 +60,13 @@ try:
         DroneAction, DroneObservation, FlightPhase,
         Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
     )
-    from .grader import EpisodeResult, TaskDefinition, TASKS, grade_episode
+    from .grader import EpisodeResult, TaskDefinition, TASKS, grade_task
 except ImportError:
     from models import (               # type: ignore[no-redef]
         DroneAction, DroneObservation, FlightPhase,
         Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
     )
-    from grader import EpisodeResult, TaskDefinition, TASKS, grade_episode  # type: ignore[no-redef]
+    from grader import EpisodeResult, TaskDefinition, TASKS, grade_task  # type: ignore[no-redef]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -301,6 +301,7 @@ class DroneDeliveryEnvironment(Environment):
         self._flight_phase = FlightPhase.GROUND
         self._cruise_altitude = self.MIN_CRUISE_ALT
         self._wind = Velocity()  # constant wind acceleration (set by task)
+        self._task_id: Optional[str] = None
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
     # ──────────────────────────────────────────
@@ -313,6 +314,7 @@ class DroneDeliveryEnvironment(Environment):
         start_pos: Optional[Position] = None,
         target_pos: Optional[Position] = None,
         custom_obstacles: Optional[List[ObstacleConfig]] = None,
+        task_id: Optional[str] = None,
     ) -> DroneObservation:
         """
         Reset the environment for a new episode.
@@ -332,6 +334,7 @@ class DroneDeliveryEnvironment(Environment):
         self._collision = False
         self._oob = False
         self._delivered = False
+        self._task_id = task_id
         self._total_reward = 0.0
         self._flight_phase = FlightPhase.GROUND
 
@@ -529,7 +532,7 @@ class DroneDeliveryEnvironment(Environment):
             landing_speed=speed if self._delivered else 0.0,
             delivery_radius=self._delivery_radius,
         )
-        return grade_episode(result)
+        return grade_task(self._task_id or "", result)
 
     def reset_from_task(self, task: TaskDefinition) -> DroneObservation:
         """
@@ -553,6 +556,7 @@ class DroneDeliveryEnvironment(Environment):
             start_pos=Position(x=task.start[0], y=task.start[1], z=0),
             target_pos=Position(x=task.target[0], y=task.target[1], z=0),
             custom_obstacles=task.custom_obstacles if task.custom_obstacles else [],
+            task_id=task.task_id,
         )
 
     @property

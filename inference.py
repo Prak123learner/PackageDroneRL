@@ -58,7 +58,6 @@ API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 
 TASK_NAME = os.getenv("DRONE_TASK", "package-delivery")
-TASK_ID = os.getenv("DRONE_TASK_ID", "")  # e.g. direct_flight, vertical_mission, obstacle_course, storm_run
 BENCHMARK = os.getenv("DRONE_BENCHMARK", "drone_delivery_rl")
 MAX_STEPS = int(os.getenv("DRONE_MAX_STEPS", "500"))
 TEMPERATURE = 0.3           # lower = more deterministic flight decisions
@@ -357,6 +356,58 @@ def parse_action(text: str) -> Tuple[float, float, float]:
     return (0.0, 0.0, 2.0)
 
 
+def _parse_task_id(text: str) -> str:
+    """
+    Parse an LLM response into a valid task id.
+    Expected JSON: {"task_id": "<one of TASKS>"}.
+    """
+    try:
+        json_match = re.search(r"\{[^}]+\}", text)
+        if json_match:
+            data = json.loads(json_match.group())
+            tid = str(data.get("task_id", "")).strip()
+            if tid in TASKS:
+                return tid
+    except Exception:
+        pass
+
+    # Fallback: look for a known task id anywhere in the text
+    for tid in TASKS:
+        if tid in text:
+            return tid
+    return TASKS[0]
+
+
+def choose_task_id(client: OpenAI) -> str:
+    """
+    Ask the LLM to choose a task id from TASKS.
+    This removes dependency on environment variables for task selection.
+    """
+    desc_lines = "\n".join(f"- {tid}: {TASK_DESCRIPTIONS.get(tid, '')}" for tid in TASKS)
+    prompt = textwrap.dedent(f"""\
+    Choose ONE task_id for this run from the list below.
+
+    Available tasks:
+    {desc_lines}
+
+    Reply with ONLY a JSON object:
+    {{"task_id": "<one of: {', '.join(TASKS)} >"}}
+    """)
+
+    completion = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "You are a strict JSON-only selector."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.0,
+        max_tokens=80,
+        stream=False,
+    )
+    text = (completion.choices[0].message.content or "").strip()
+    return _parse_task_id(text)
+
+
 def get_llm_action(
     client: OpenAI,
     obs: Dict,
@@ -423,85 +474,82 @@ def main() -> None:
         print("[ERROR] Environment not reachable. Exiting.", flush=True)
         sys.exit(1)
 
-    history: List[Dict] = []
-    rewards: List[float] = []
-    steps_taken = 0
-    score = 0.0
-    success = False
+    def run_episode(task_id: str) -> None:
+        history: List[Dict] = []
+        rewards: List[float] = []
+        steps_taken = 0
+        score = 0.0
+        success = False
 
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+        log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+
+        try:
+            if task_id:
+                print(f"[DEBUG] Using task_id: {task_id}", flush=True)
+            obs = env.reset(task_id=task_id or None)
+            last_reward = 0.0
+            done = obs.get("done", False)
+
+            for step in range(1, MAX_STEPS + 1):
+                if done:
+                    break
+
+                ax, ay, az, raw_text = get_llm_action(llm_client, obs, step, last_reward, history)
+                obs = env.step(ax, ay, az)
+
+                reward = obs.get("reward", 0.0)
+                done = obs.get("done", False)
+                error = None
+
+                rewards.append(reward)
+                steps_taken = step
+                last_reward = reward
+
+                action_str = f"ax={ax:.1f},ay={ay:.1f},az={az:.1f}"
+                log_step(step=step, action=action_str, reward=reward, done=done, error=error)
+
+                prompt_text = format_observation(obs, step, last_reward)
+                history.append({"prompt": prompt_text, "response": raw_text})
+
+                if done:
+                    if obs.get("package_delivered", False):
+                        print(f"[DEBUG] Package delivered in {step} steps!", flush=True)
+                    elif obs.get("collision_occurred", False):
+                        print(f"[DEBUG] Collision at step {step}", flush=True)
+                    elif obs.get("out_of_bounds", False):
+                        print(f"[DEBUG] Out of bounds at step {step}", flush=True)
+                    else:
+                        print(f"[DEBUG] Timeout at step {step}", flush=True)
+                    break
+
+            # Local fallback score (kept for robustness if /grade fails)
+            total = sum(rewards)
+            score = total / MAX_TOTAL_REWARD if MAX_TOTAL_REWARD > 0 else 0.0
+            score = min(max(score, 0.0), 1.0)
+            success = score >= SUCCESS_SCORE_THRESHOLD
+
+            if done:
+                try:
+                    grade_result = env.grade()
+                    server_score = grade_result.get("score", score)
+                    print(f"[DEBUG] Server grade: {grade_result}", flush=True)
+                    score = float(server_score)
+                    success = score >= SUCCESS_SCORE_THRESHOLD
+                except Exception as e:
+                    print(f"[DEBUG] Could not fetch grade: {e}", flush=True)
+
+        except requests.exceptions.ConnectionError as e:
+            print(f"[ERROR] Lost connection to environment: {e}", flush=True)
+        except Exception as e:
+            print(f"[ERROR] Unexpected error: {e}", flush=True)
+        finally:
+            log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     try:
-        # Reset environment (with optional task_id)
-        reset_task = TASK_ID if TASK_ID else None
-        if reset_task:
-            print(f"[DEBUG] Using task_id: {reset_task}", flush=True)
-        obs = env.reset(task_id=reset_task)
-        last_reward = 0.0
-        done = obs.get("done", False)
-
-        for step in range(1, MAX_STEPS + 1):
-            if done:
-                break
-
-            # Ask LLM for acceleration
-            ax, ay, az, raw_text = get_llm_action(llm_client, obs, step, last_reward, history)
-
-            # Execute action
-            obs = env.step(ax, ay, az)
-
-            reward = obs.get("reward", 0.0)
-            done = obs.get("done", False)
-            error = None
-
-            rewards.append(reward)
-            steps_taken = step
-            last_reward = reward
-
-            # Format action string for logging
-            action_str = f"ax={ax:.1f},ay={ay:.1f},az={az:.1f}"
-            log_step(step=step, action=action_str, reward=reward, done=done, error=error)
-
-            # Track conversation history
-            prompt_text = format_observation(obs, step, last_reward)
-            history.append({"prompt": prompt_text, "response": raw_text})
-
-            if done:
-                # Log final outcome
-                if obs.get("package_delivered", False):
-                    print(f"[DEBUG] Package delivered in {step} steps!", flush=True)
-                elif obs.get("collision_occurred", False):
-                    print(f"[DEBUG] Collision at step {step}", flush=True)
-                elif obs.get("out_of_bounds", False):
-                    print(f"[DEBUG] Out of bounds at step {step}", flush=True)
-                else:
-                    print(f"[DEBUG] Timeout at step {step}", flush=True)
-                break
-
-        # Compute normalized score in [0, 1]
-        total = sum(rewards)
-        score = total / MAX_TOTAL_REWARD if MAX_TOTAL_REWARD > 0 else 0.0
-        score = min(max(score, 0.0), 1.0)
-        success = score >= SUCCESS_SCORE_THRESHOLD
-
-        # Try to get the official grade from the server
-        if done:
-            try:
-                grade_result = env.grade()
-                server_score = grade_result.get("score", score)
-                print(f"[DEBUG] Server grade: {grade_result}", flush=True)
-                score = server_score
-                success = score >= SUCCESS_SCORE_THRESHOLD
-            except Exception as e:
-                print(f"[DEBUG] Could not fetch grade: {e}", flush=True)
-
-    except requests.exceptions.ConnectionError as e:
-        print(f"[ERROR] Lost connection to environment: {e}", flush=True)
-    except Exception as e:
-        print(f"[ERROR] Unexpected error: {e}", flush=True)
+        chosen_task_id = choose_task_id(llm_client)
+        run_episode(chosen_task_id)
     finally:
         env.close()
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 if __name__ == "__main__":

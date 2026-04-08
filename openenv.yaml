@@ -68,6 +68,7 @@ tasks:
     delivery_radius: 1.5
     wind: [2.0, 0.0, 0.0]
     target_score: [0.1, 0.35]
+    graders: [episode_score]
     description: >
       Navigate through dense obstacles with constant wind (2 m/s^2 eastward)
       pushing the drone off course. Tests wind compensation and precision.

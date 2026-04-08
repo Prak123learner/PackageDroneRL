@@ -225,31 +225,25 @@ class EpisodeResult:
 #  Grader
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Scoring weights (must sum to 1.0)
-W_DELIVERY   = 0.40   # did the package arrive?
-W_PROGRESS   = 0.25   # how close did we get?
-W_EFFICIENCY = 0.15   # step economy
-W_SAFETY     = 0.10   # collision / OOB avoidance
-W_SMOOTHNESS = 0.10   # landing quality
-
 # Some external evaluators require task scores to be strictly within (0, 1)
 # (i.e., not exactly 0.0 or 1.0).
 _STRICT_SCORE_EPS = 1e-4
 
 
-def grade_episode(result: EpisodeResult) -> Dict[str, float]:
-    """
-    Score an episode result.  Returns a dict with component scores
-    plus the final ``score`` in [0.0, 1.0].
+def _strict_score(score: float) -> float:
+    """Clamp score strictly within (0, 1)."""
+    score = min(1.0 - _STRICT_SCORE_EPS, max(_STRICT_SCORE_EPS, score))
+    return round(score, 4)
 
-    Deterministic:  same EpisodeResult → same score.
-    """
+
+def _compute_components(result: EpisodeResult) -> Dict[str, float]:
+    """Compute common component scores in [0, 1] (task-agnostic)."""
     # ── Delivery (0 or 1) ─────────────────────
     delivery = 1.0 if result.delivered else 0.0
 
     # ── Progress (0 → didn't move, 1 → reached target vicinity) ───
     if result.initial_dist > 0:
-        dist_covered = max(0, result.initial_dist - result.final_dist)
+        dist_covered = max(0.0, result.initial_dist - result.final_dist)
         progress = min(1.0, dist_covered / result.initial_dist)
     else:
         progress = 1.0
@@ -257,7 +251,7 @@ def grade_episode(result: EpisodeResult) -> Dict[str, float]:
     # ── Efficiency (1 → used few steps, 0 → used all) ─────────────
     if result.delivered:
         # Optimal steps estimate: distance / (max_speed * dt)
-        optimal = max(50, result.initial_dist / (16.67 * 0.1))
+        optimal = max(50.0, result.initial_dist / (16.67 * 0.1))
         ratio = optimal / max(1, result.steps_used)
         efficiency = min(1.0, ratio)
     else:
@@ -278,34 +272,123 @@ def grade_episode(result: EpisodeResult) -> Dict[str, float]:
     else:
         smoothness = 0.0
 
-    # ── Weighted score ────────────────────────────────────────────
-    score = (
-        W_DELIVERY   * delivery   +
-        W_PROGRESS   * progress   +
-        W_EFFICIENCY * efficiency +
-        W_SAFETY     * safety     +
-        W_SMOOTHNESS * smoothness
-    )
-    # Keep score strictly within (0, 1) for compatibility with graders that
-    # forbid boundary values.
-    score = min(1.0 - _STRICT_SCORE_EPS, max(_STRICT_SCORE_EPS, score))
-    score = round(score, 4)
-
     return {
-        "score": score,
         "delivery": round(delivery, 4),
         "progress": round(progress, 4),
         "efficiency": round(efficiency, 4),
         "safety": round(safety, 4),
         "smoothness": round(smoothness, 4),
-        "weights": {
-            "delivery": W_DELIVERY,
-            "progress": W_PROGRESS,
-            "efficiency": W_EFFICIENCY,
-            "safety": W_SAFETY,
-            "smoothness": W_SMOOTHNESS,
-        },
     }
+
+
+def _weighted_score(components: Dict[str, float], weights: Dict[str, float]) -> float:
+    return (
+        weights["delivery"] * components["delivery"]
+        + weights["progress"] * components["progress"]
+        + weights["efficiency"] * components["efficiency"]
+        + weights["safety"] * components["safety"]
+        + weights["smoothness"] * components["smoothness"]
+    )
+
+
+def grade_direct_flight(result: EpisodeResult) -> Dict[str, float]:
+    """
+    Easy: emphasize progress and basic delivery, light smoothness requirement.
+    """
+    weights = {
+        "delivery": 0.35,
+        "progress": 0.35,
+        "efficiency": 0.20,
+        "safety": 0.08,
+        "smoothness": 0.02,
+    }
+    c = _compute_components(result)
+    score = _strict_score(_weighted_score(c, weights))
+    return {"score": score, **c, "weights": weights, "task_id": "direct_flight"}
+
+
+def grade_vertical_mission(result: EpisodeResult) -> Dict[str, float]:
+    """
+    Medium: emphasize landing smoothness and successful delivery (full phase control).
+    """
+    weights = {
+        "delivery": 0.40,
+        "progress": 0.20,
+        "efficiency": 0.10,
+        "safety": 0.10,
+        "smoothness": 0.20,
+    }
+    c = _compute_components(result)
+    score = _strict_score(_weighted_score(c, weights))
+    return {"score": score, **c, "weights": weights, "task_id": "vertical_mission"}
+
+
+def grade_obstacle_course(result: EpisodeResult) -> Dict[str, float]:
+    """
+    Hard: emphasize safety (collision avoidance) while still rewarding progress.
+    """
+    weights = {
+        "delivery": 0.30,
+        "progress": 0.25,
+        "efficiency": 0.10,
+        "safety": 0.25,
+        "smoothness": 0.10,
+    }
+    c = _compute_components(result)
+    score = _strict_score(_weighted_score(c, weights))
+    return {"score": score, **c, "weights": weights, "task_id": "obstacle_course"}
+
+
+def grade_storm_run(result: EpisodeResult) -> Dict[str, float]:
+    """
+    Expert: harsh on safety and requires making meaningful progress under wind.
+    """
+    weights = {
+        "delivery": 0.30,
+        "progress": 0.30,
+        "efficiency": 0.05,
+        "safety": 0.30,
+        "smoothness": 0.05,
+    }
+    c = _compute_components(result)
+    score = _strict_score(_weighted_score(c, weights))
+    return {"score": score, **c, "weights": weights, "task_id": "storm_run"}
+
+
+TASK_GRADERS = {
+    "direct_flight": grade_direct_flight,
+    "vertical_mission": grade_vertical_mission,
+    "obstacle_course": grade_obstacle_course,
+    "storm_run": grade_storm_run,
+}
+
+
+def grade_task(task_id: str, result: EpisodeResult) -> Dict[str, float]:
+    """
+    Dispatch grading to the task-specific grader.
+
+    If task_id is unknown/empty, falls back to a reasonable default
+    that stays within (0, 1).
+    """
+    fn = TASK_GRADERS.get(task_id)
+    if fn is None:
+        # Default: closest to "medium" behaviour
+        weights = {
+            "delivery": 0.40,
+            "progress": 0.25,
+            "efficiency": 0.15,
+            "safety": 0.10,
+            "smoothness": 0.10,
+        }
+        c = _compute_components(result)
+        score = _strict_score(_weighted_score(c, weights))
+        return {"score": score, **c, "weights": weights, "task_id": task_id or "unknown"}
+    return fn(result)
+
+
+# Backwards-compatible name (older code imports grade_episode)
+def grade_episode(result: EpisodeResult) -> Dict[str, float]:
+    return grade_task("unknown", result)
 
 
 def list_tasks() -> List[Dict]:
