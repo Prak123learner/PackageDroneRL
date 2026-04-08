@@ -21,7 +21,7 @@ HuggingFace Spaces
 ------------------
 This file is the entry point. Set
 
-    CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+    CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860"]
 
 in your Dockerfile (HF Spaces exposes port 7860 by default).
 
@@ -34,10 +34,16 @@ requests share a single default environment.
 
 import math
 import os
+import sys
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from pathlib import Path
+
+# Ensure the project root is on sys.path so sibling modules resolve
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,7 +79,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRONTEND_DIR = Path(__file__).parent / "frontend"
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Session registry
@@ -494,4 +500,4 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("server.app:app", host="0.0.0.0", port=port, reload=True)

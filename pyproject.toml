@@ -10,17 +10,15 @@ dependencies = [
     "requests>=2.31.0",
     "starlette>=0.36.0",
     "openai>=1.0.0",
+    "openenv-core>=0.2.0",
 ]
 
-[project.optional-dependencies]
-openenv = ["openenv-core>=0.2.0"]
-
 [project.scripts]
-server = "app:main"
-drone-delivery-rl = "app:main"
+server = "server.app:main"
+drone-delivery-rl = "server.app:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["server"]
 
 [build-system]
 requires = ["hatchling"]
