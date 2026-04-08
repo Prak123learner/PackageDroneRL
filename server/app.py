@@ -494,10 +494,14 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Entry point (local dev)
+#  Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def main():
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("server.app:app", host="0.0.0.0", port=port, reload=True)
+
+
+if __name__ == "__main__":
+    main()
