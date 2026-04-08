@@ -10,3 +10,5 @@ dist/
 build/
 .agents/
 .gemini/
+inference.py
+example_usage.py

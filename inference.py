@@ -5,17 +5,19 @@ An LLM agent controls a 3D delivery drone through flight phases
 (GROUND → LIFTING → CRUISING → DESCENDING → LANDED) by choosing
 acceleration commands (ax, ay, az) each step.
 
+STANDALONE: This script only requires `requests` and `openai` — no
+openenv-core or other project files needed.
+
 MANDATORY ENV VARS
 ------------------
-    API_BASE_URL       LLM API endpoint.
-    MODEL_NAME         Model identifier.
     HF_TOKEN           HuggingFace / API key.
 
 OPTIONAL ENV VARS
 -----------------
-    IMAGE_NAME         Docker image for the environment (docker mode).
-    ENV_URL            URL of a running environment server (url mode).
+    ENV_URL            URL of the running environment server.
                        Defaults to http://localhost:7860 (HF Spaces port).
+    API_BASE_URL       LLM API endpoint (default: HF router).
+    MODEL_NAME         Model identifier (default: Qwen/Qwen2.5-72B-Instruct).
 
 STDOUT FORMAT
 -------------
@@ -24,23 +26,21 @@ STDOUT FORMAT
     [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
-import asyncio
 import json
 import os
 import re
+import sys
 import textwrap
+import time
 from typing import Dict, List, Optional, Tuple
 
+import requests
 from openai import OpenAI
-
-from client import DroneEnv
-from models import DroneAction, DroneObservation
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-IMAGE_NAME = os.getenv("IMAGE_NAME")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
@@ -51,6 +51,7 @@ BENCHMARK = os.getenv("DRONE_BENCHMARK", "drone_delivery_rl")
 MAX_STEPS = int(os.getenv("DRONE_MAX_STEPS", "500"))
 TEMPERATURE = 0.3           # lower = more deterministic flight decisions
 MAX_TOKENS = 200
+HTTP_TIMEOUT = 30           # seconds per HTTP request to the environment
 
 # Scoring: delivery = +100, progress ≈ +240, path bonus ≈ +150, living ≈ -50
 # A successful delivery yields roughly +440. We normalize to [0, 1].
@@ -101,6 +102,97 @@ STRATEGY HINTS:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  Simple HTTP client for the Drone Environment REST API
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DroneEnvClient:
+    """
+    Lightweight HTTP client for the Drone Delivery REST API.
+
+    Connects directly to the FastAPI server endpoints (/health, /reset, /step,
+    /grade). No openenv-core dependency required.
+    """
+
+    def __init__(self, base_url: str, session_id: str = "inference"):
+        self.base_url = base_url.rstrip("/")
+        self.session_id = session_id
+        self._session = requests.Session()
+        self._session.headers.update({"Content-Type": "application/json"})
+
+    def health(self) -> Dict:
+        """Check if the environment server is alive."""
+        resp = self._session.get(
+            f"{self.base_url}/health",
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def reset(self, task_id: Optional[str] = None) -> Dict:
+        """Reset the environment and start a new episode."""
+        body: Dict = {}
+        if task_id:
+            body["task_id"] = task_id
+        resp = self._session.post(
+            f"{self.base_url}/reset",
+            params={"session_id": self.session_id},
+            json=body,
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def step(self, ax: float, ay: float, az: float) -> Dict:
+        """Advance simulation by one timestep with the given accelerations."""
+        resp = self._session.post(
+            f"{self.base_url}/step",
+            params={"session_id": self.session_id},
+            json={"ax": ax, "ay": ay, "az": az},
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def grade(self) -> Dict:
+        """Grade the completed episode (call after done=true)."""
+        resp = self._session.get(
+            f"{self.base_url}/grade",
+            params={"session_id": self.session_id},
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def close(self):
+        """Close the HTTP session."""
+        self._session.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Wait for environment to become ready
+# ──────────────────────────────────────────────────────────────────────────────
+
+def wait_for_env(client: DroneEnvClient, max_wait: int = 120) -> bool:
+    """
+    Poll /health until the environment is ready.
+    Returns True if healthy, False if timed out.
+    """
+    print(f"[DEBUG] Waiting for environment at {client.base_url} ...", flush=True)
+    start = time.time()
+    delay = 2.0
+    while time.time() - start < max_wait:
+        try:
+            result = client.health()
+            print(f"[DEBUG] Environment ready: {result}", flush=True)
+            return True
+        except Exception:
+            time.sleep(delay)
+            delay = min(delay * 1.5, 10.0)
+    print(f"[ERROR] Environment not ready after {max_wait}s", flush=True)
+    return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  Logging helpers (mandatory stdout format)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -129,48 +221,54 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 #  Observation → LLM prompt
 # ──────────────────────────────────────────────────────────────────────────────
 
-def format_observation(obs: DroneObservation, step: int, last_reward: float) -> str:
-    """Format the drone observation into a concise prompt for the LLM."""
-    pos = obs.position
-    vel = obs.velocity
-    td = obs.target_direction
-    tp = obs.target_position
+def format_observation(obs: Dict, step: int, last_reward: float) -> str:
+    """Format the drone observation dict into a concise prompt for the LLM."""
+    pos = obs.get("position", {})
+    vel = obs.get("velocity", {})
+    td = obs.get("target_direction", [0.0, 0.0, 0.0])
+    tp = obs.get("target_position", {})
+    meta = obs.get("metadata", {})
 
     lines = [
-        f"Step: {step} / {obs.steps_remaining + step}",
-        f"Flight Phase: {obs.flight_phase}",
-        f"Position: x={pos.x:.1f}, y={pos.y:.1f}, z={pos.z:.1f}",
-        f"Velocity: vx={vel.vx:.1f}, vy={vel.vy:.1f}, vz={vel.vz:.1f}",
-        f"Speed: {obs.metadata.get('speed', 0):.1f} m/s",
-        f"Target: x={tp.x:.1f}, y={tp.y:.1f}, z={tp.z:.1f}",
+        f"Step: {step} / {obs.get('steps_remaining', 0) + step}",
+        f"Flight Phase: {obs.get('flight_phase', 'GROUND')}",
+        f"Position: x={pos.get('x', 0):.1f}, y={pos.get('y', 0):.1f}, z={pos.get('z', 0):.1f}",
+        f"Velocity: vx={vel.get('vx', 0):.1f}, vy={vel.get('vy', 0):.1f}, vz={vel.get('vz', 0):.1f}",
+        f"Speed: {meta.get('speed', 0):.1f} m/s",
+        f"Target: x={tp.get('x', 0):.1f}, y={tp.get('y', 0):.1f}, z={tp.get('z', 0):.1f}",
         f"Target Direction (unit vec): [{td[0]:.3f}, {td[1]:.3f}, {td[2]:.3f}]",
-        f"Distance to Target: {obs.distance_to_target:.1f} m",
-        f"Horizontal Distance: {obs.horizontal_distance_to_target:.1f} m",
-        f"Cruise Altitude: {obs.cruise_altitude:.1f} m",
+        f"Distance to Target: {obs.get('distance_to_target', 0):.1f} m",
+        f"Horizontal Distance: {obs.get('horizontal_distance_to_target', 0):.1f} m",
+        f"Cruise Altitude: {obs.get('cruise_altitude', 15):.1f} m",
         f"Last Reward: {last_reward:.2f}",
     ]
 
     # Waypoint hint
-    if obs.next_waypoint:
-        wp = obs.next_waypoint
-        lines.append(f"Next Waypoint: x={wp.x:.1f}, y={wp.y:.1f}, z={wp.z:.1f} ({obs.path_length} remaining)")
+    wp = obs.get("next_waypoint")
+    if wp:
+        lines.append(
+            f"Next Waypoint: x={wp.get('x', 0):.1f}, y={wp.get('y', 0):.1f}, "
+            f"z={wp.get('z', 0):.1f} ({obs.get('path_length', 0)} remaining)"
+        )
 
     # Nearby obstacles (top 3)
-    if obs.nearby_obstacles:
+    nearby = obs.get("nearby_obstacles", [])
+    if nearby:
         obs_strs = []
-        for o in obs.nearby_obstacles[:3]:
+        for o in nearby[:3]:
             obs_strs.append(
-                f"  - {o.obstacle_type} at distance {o.distance:.1f}m "
-                f"(rel: x={o.relative_x:.1f}, y={o.relative_y:.1f}, z={o.relative_z:.1f}, "
-                f"size: {o.size_x:.0f}×{o.size_y:.0f}×{o.size_z:.0f})"
+                f"  - {o.get('obstacle_type', 'unknown')} at distance {o.get('distance', 0):.1f}m "
+                f"(rel: x={o.get('relative_x', 0):.1f}, y={o.get('relative_y', 0):.1f}, "
+                f"z={o.get('relative_z', 0):.1f}, "
+                f"size: {o.get('size_x', 2):.0f}×{o.get('size_y', 2):.0f}×{o.get('size_z', 10):.0f})"
             )
-        lines.append(f"Nearby Obstacles ({len(obs.nearby_obstacles)} total):")
+        lines.append(f"Nearby Obstacles ({len(nearby)} total):")
         lines.extend(obs_strs)
     else:
         lines.append("Nearby Obstacles: none in sensor range")
 
     lines.append("")
-    lines.append("Decide your acceleration. Reply with ONLY: {\"ax\": <float>, \"ay\": <float>, \"az\": <float>}")
+    lines.append('Decide your acceleration. Reply with ONLY: {"ax": <float>, "ay": <float>, "az": <float>}')
     return "\n".join(lines)
 
 
@@ -208,7 +306,7 @@ def parse_action(text: str) -> Tuple[float, float, float]:
 
 def get_llm_action(
     client: OpenAI,
-    obs: DroneObservation,
+    obs: Dict,
     step: int,
     last_reward: float,
     history: List[Dict],
@@ -241,17 +339,15 @@ def get_llm_action(
     except Exception as exc:
         print(f"[DEBUG] Model request failed: {exc}", flush=True)
         # Fallback: use simple heuristic based on phase
-        phase = obs.flight_phase
+        phase = obs.get("flight_phase", "GROUND")
+        td = obs.get("target_direction", [0.0, 0.0, 0.0])
         if phase == "GROUND":
             return 0.0, 0.0, 5.0, '{"ax":0,"ay":0,"az":5}'
         elif phase == "LIFTING":
-            td = obs.target_direction
             return td[0] * 1.0, td[1] * 1.0, 4.0, "fallback-lifting"
         elif phase == "CRUISING":
-            td = obs.target_direction
             return td[0] * 3.5, td[1] * 3.5, 0.0, "fallback-cruising"
         elif phase == "DESCENDING":
-            td = obs.target_direction
             return td[0] * 1.5, td[1] * 1.5, -2.0, "fallback-descending"
         return 0.0, 0.0, 0.0, "fallback-default"
 
@@ -260,16 +356,19 @@ def get_llm_action(
 #  Main episode loop
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+def main() -> None:
+    # ── Validate configuration ──
+    if not API_KEY:
+        print("[ERROR] HF_TOKEN or API_KEY environment variable is required.", flush=True)
+        sys.exit(1)
 
-    # Connect to environment: Docker image or running server URL
-    if IMAGE_NAME:
-        print(f"[DEBUG] Launching env from Docker image: {IMAGE_NAME}", flush=True)
-        env = await DroneEnv.from_docker_image(IMAGE_NAME)
-    else:
-        print(f"[DEBUG] Connecting to env at: {ENV_URL}", flush=True)
-        env = DroneEnv(base_url=ENV_URL)
+    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    env = DroneEnvClient(base_url=ENV_URL)
+
+    # Wait for environment to be ready (important for cold-start on HF Spaces)
+    if not wait_for_env(env):
+        print("[ERROR] Environment not reachable. Exiting.", flush=True)
+        sys.exit(1)
 
     history: List[Dict] = []
     rewards: List[float] = []
@@ -280,24 +379,23 @@ async def main() -> None:
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        result = await env.reset()
-        obs = result.observation
+        # Reset environment
+        obs = env.reset()
         last_reward = 0.0
+        done = obs.get("done", False)
 
         for step in range(1, MAX_STEPS + 1):
-            if result.done:
+            if done:
                 break
 
             # Ask LLM for acceleration
-            ax, ay, az, raw_text = get_llm_action(client, obs, step, last_reward, history)
+            ax, ay, az, raw_text = get_llm_action(llm_client, obs, step, last_reward, history)
 
             # Execute action
-            action = DroneAction(ax=ax, ay=ay, az=az)
-            result = await env.step(action)
-            obs = result.observation
+            obs = env.step(ax, ay, az)
 
-            reward = result.reward or 0.0
-            done = result.done
+            reward = obs.get("reward", 0.0)
+            done = obs.get("done", False)
             error = None
 
             rewards.append(reward)
@@ -314,11 +412,11 @@ async def main() -> None:
 
             if done:
                 # Log final outcome
-                if obs.package_delivered:
+                if obs.get("package_delivered", False):
                     print(f"[DEBUG] 📦 Package delivered in {step} steps!", flush=True)
-                elif obs.collision_occurred:
+                elif obs.get("collision_occurred", False):
                     print(f"[DEBUG] 💥 Collision at step {step}", flush=True)
-                elif obs.out_of_bounds:
+                elif obs.get("out_of_bounds", False):
                     print(f"[DEBUG] ⚠ Out of bounds at step {step}", flush=True)
                 else:
                     print(f"[DEBUG] ⏱ Timeout at step {step}", flush=True)
@@ -330,13 +428,25 @@ async def main() -> None:
         score = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
 
+        # Try to get the official grade from the server
+        if done:
+            try:
+                grade_result = env.grade()
+                server_score = grade_result.get("score", score)
+                print(f"[DEBUG] Server grade: {grade_result}", flush=True)
+                score = server_score
+                success = score >= SUCCESS_SCORE_THRESHOLD
+            except Exception as e:
+                print(f"[DEBUG] Could not fetch grade: {e}", flush=True)
+
+    except requests.exceptions.ConnectionError as e:
+        print(f"[ERROR] Lost connection to environment: {e}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Unexpected error: {e}", flush=True)
     finally:
-        try:
-            await env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error (container cleanup): {e}", flush=True)
+        env.close()
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
