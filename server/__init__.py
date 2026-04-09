@@ -14,8 +14,9 @@ from models import (
     Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
 )
 from grader import (
-    TASKS, TaskDefinition, EpisodeResult,
-    grade_episode, list_tasks,
+    TASKS, TASK_CONFIGS, TaskDefinition, EpisodeResult,
+    BaseGrader, Task1Grader, Task2Grader, Task3Grader, Task4Grader,
+    grade_episode, grade_task, list_tasks, get_task_json, save_task_result,
 )
 from client import DroneEnv
 
@@ -31,8 +32,17 @@ __all__ = [
     "ObstacleConfig",
     "DroneEnv",
     "TASKS",
+    "TASK_CONFIGS",
     "TaskDefinition",
     "EpisodeResult",
+    "BaseGrader",
+    "Task1Grader",
+    "Task2Grader",
+    "Task3Grader",
+    "Task4Grader",
     "grade_episode",
+    "grade_task",
     "list_tasks",
+    "get_task_json",
+    "save_task_result",
 ]

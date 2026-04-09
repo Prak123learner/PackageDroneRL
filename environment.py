@@ -7,11 +7,16 @@
 """
 Drone Delivery RL Environment
 ==============================
-A 3-D continuous-state environment where a drone must navigate from a start
+A continuous-state environment where a drone must navigate from a start
 position to a delivery target while avoiding obstacles.
 
-Flight Phases
--------------
+Movement Modes
+--------------
+  2D (task_1_easy)  — drone moves in the XY plane only (z fixed at 0).
+  3D (all others)   — full 3-D flight with flight phases.
+
+Flight Phases (3D mode only)
+-----------------------------
   GROUND      → LIFTING → CRUISING → DESCENDING → LANDED
   The drone starts on the ground, lifts to a dynamic cruise altitude
   (computed from the tallest obstacle + safety margin), cruises towards
@@ -23,7 +28,8 @@ Physics model
   - Euler integration at configurable dt (default 0.1 s).
   - Acceleration commands are clamped to [-max_accel, +max_accel].
   - Speed is clamped to max_speed after integration.
-  - Agent has full control over (ax, ay, az) thrust commands.
+  - In 3D mode the agent has full control over (ax, ay, az).
+  - In 2D mode az is forced to 0.
 
 Obstacle Model
 --------------
@@ -32,7 +38,7 @@ Obstacle Model
 
 Reward shaping
 --------------
-  +100   package delivered (LANDED)
+  +100   package delivered (LANDED or within delivery_radius at z≈0)
   -100   collision
    -50   out-of-bounds
    +r    progress reward: Δ(distance_to_target) * progress_reward_scale
@@ -60,13 +66,19 @@ try:
         DroneAction, DroneObservation, FlightPhase,
         Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
     )
-    from .grader import EpisodeResult, TaskDefinition, TASKS, grade_task
+    from .grader import (
+        EpisodeResult, TaskDefinition, TASKS, TASK_CONFIGS,
+        grade_task, save_task_result,
+    )
 except ImportError:
     from models import (               # type: ignore[no-redef]
         DroneAction, DroneObservation, FlightPhase,
         Position, Velocity, Obstacle, NearbyObstacle, ObstacleConfig,
     )
-    from grader import EpisodeResult, TaskDefinition, TASKS, grade_task  # type: ignore[no-redef]
+    from grader import (               # type: ignore[no-redef]
+        EpisodeResult, TaskDefinition, TASKS, TASK_CONFIGS,
+        grade_task, save_task_result,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -211,8 +223,13 @@ class DroneDeliveryEnvironment(Environment):
     a target near (180, 180, 0).  Random box obstacles (buildings / towers)
     are scattered inside.
 
-    Flight Phases
-    -------------
+    Movement Modes
+    --------------
+    2D — drone moves on the XY ground plane only (task_1_easy).
+    3D — full flight phases (all other tasks).
+
+    Flight Phases (3D only)
+    -----------------------
     GROUND → LIFTING → CRUISING → DESCENDING → LANDED
 
     The drone starts on the ground and must lift off, fly at cruise altitude
@@ -273,13 +290,47 @@ class DroneDeliveryEnvironment(Environment):
 
     def __init__(
         self,
-        world_size: float = 200.0,
-        num_obstacles: int = 15,
+        task_id: str = "task_1_easy",
+        *,
+        # Legacy kwargs — used only when task_id is not in TASK_CONFIGS
+        world_size: Optional[float] = None,
+        num_obstacles: Optional[int] = None,
         seed: Optional[int] = None,
     ):
-        self._world_size = world_size
-        self._num_obstacles = num_obstacles
-        self._rng = random.Random(seed)
+        # ── Resolve configuration ──
+        if task_id in TASK_CONFIGS:
+            self.task_id = task_id
+            self.config = TASK_CONFIGS[task_id]
+        elif world_size is not None or num_obstacles is not None:
+            # Legacy / free-play mode – caller supplied raw params
+            self.task_id = task_id or "task_1_easy"
+            self.config = {
+                "world_size": world_size or self.WORLD_SIZE,
+                "num_obstacles": num_obstacles or 15,
+                "seed": seed,
+                "movement_mode": "3d",
+                "max_steps": self.MAX_STEPS,
+                "delivery_radius": self.DELIVERY_RADIUS,
+                "wind": (0.0, 0.0, 0.0),
+                "custom_obstacles": [],
+                "start": (10, 10),
+                "target": (180, 180),
+            }
+        else:
+            raise ValueError(
+                f"Unknown task '{task_id}'. "
+                f"Valid: {list(TASK_CONFIGS.keys())}"
+            )
+
+        self._setup()
+
+    def _setup(self):
+        """Initialise all internal state from self.config."""
+        cfg = self.config
+        self._world_size = cfg.get("world_size", self.WORLD_SIZE)
+        self._num_obstacles = cfg.get("num_obstacles", 15)
+        self._is_2d = cfg.get("movement_mode", "3d") == "2d"
+        self._rng = random.Random(cfg.get("seed"))
 
         # will be populated on reset()
         self._pos = Position(x=0, y=0, z=0)
@@ -296,12 +347,16 @@ class DroneDeliveryEnvironment(Environment):
         self._prev_dist = 0.0
         self._initial_dist = 0.0
         self._total_reward = 0.0
-        self._delivery_radius = self.DELIVERY_RADIUS  # can be overridden per task
-        self._max_steps = self.MAX_STEPS  # instance-level budget (overridden by tasks)
+        self._delivery_radius = cfg.get("delivery_radius", self.DELIVERY_RADIUS)
+        self._max_steps = cfg.get("max_steps", self.MAX_STEPS)
         self._flight_phase = FlightPhase.GROUND
         self._cruise_altitude = self.MIN_CRUISE_ALT
-        self._wind = Velocity()  # constant wind acceleration (set by task)
-        self._task_id: Optional[str] = None
+        self._wind = Velocity(
+            vx=cfg.get("wind", (0, 0, 0))[0],
+            vy=cfg.get("wind", (0, 0, 0))[1],
+            vz=cfg.get("wind", (0, 0, 0))[2],
+        )
+        self._task_id: str = self.task_id
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
     # ──────────────────────────────────────────
@@ -328,51 +383,69 @@ class DroneDeliveryEnvironment(Environment):
         custom_obstacles : list[ObstacleConfig], optional
             User-defined obstacles.  When provided, random generation is
             skipped and these obstacles are used instead.
+        task_id : str, optional
+            If provided, overrides the current task_id for grading.
         """
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._done = False
         self._collision = False
         self._oob = False
         self._delivered = False
-        self._task_id = task_id
+        if task_id:
+            self._task_id = task_id
         self._total_reward = 0.0
+
+        # In 2D mode, flight phase stays GROUND; in 3D, starts at GROUND
         self._flight_phase = FlightPhase.GROUND
 
         ws = self._world_size
         jitter = lambda base, spread: base + self._rng.uniform(-spread, spread)
 
         # ── Start position ──
+        cfg = self.config
+        default_start = cfg.get("start", (10, 10))
         if start_pos is not None:
             self._pos = Position(x=start_pos.x, y=start_pos.y, z=0.0)
         else:
             self._pos = Position(
-                x=jitter(10.0, 3.0),
-                y=jitter(10.0, 3.0),
+                x=jitter(default_start[0], 3.0),
+                y=jitter(default_start[1], 3.0),
                 z=0.0,
             )
         self._vel = Velocity()
         self._accel = Velocity()
 
         # ── Target position ──
+        default_target = cfg.get("target", (ws - 20.0, ws - 20.0))
         if target_pos is not None:
             self._target = Position(x=target_pos.x, y=target_pos.y, z=0.0)
         else:
             self._target = Position(
-                x=jitter(ws - 20.0, 5.0),
-                y=jitter(ws - 20.0, 5.0),
+                x=jitter(default_target[0], 5.0),
+                y=jitter(default_target[1], 5.0),
                 z=0.0,
             )
 
         # ── Obstacles ──
         if custom_obstacles is not None:
             self._obstacles = self._build_custom_obstacles(custom_obstacles)
+        elif cfg.get("custom_obstacles"):
+            self._obstacles = self._build_custom_obstacles(cfg["custom_obstacles"])
         else:
             self._obstacles = self._generate_obstacles()
 
-        self._cruise_altitude = self._compute_cruise_altitude()
+        if not self._is_2d:
+            self._cruise_altitude = self._compute_cruise_altitude()
+        else:
+            self._cruise_altitude = 0.0
+
         self._prev_dist = self._dist_to_target()
         self._initial_dist = self._prev_dist   # save for grader normalisation
-        self._plan_path()
+        if not self._is_2d:
+            self._plan_path()
+        else:
+            self._path = []
+            self._waypoint_idx = 0
 
         return self._make_observation(reward=0.0)
 
@@ -388,27 +461,32 @@ class DroneDeliveryEnvironment(Environment):
         ay = self._clamp(action.ay, -self.MAX_ACCEL, self.MAX_ACCEL)
         az = self._clamp(action.az, -self.MAX_ACCEL, self.MAX_ACCEL)
 
-        # ── flight-phase specific physics ────
-        if self._flight_phase == FlightPhase.GROUND:
-            # On the ground: dampen horizontal movement, only z matters
-            ax *= (1.0 - self.GROUND_DRAG)
-            ay *= (1.0 - self.GROUND_DRAG)
-            # Prevent going below ground
-            if self._pos.z <= 0.0 and az < 0:
-                az = 0.0
+        # ── 2D mode: force z to 0 ────────────
+        if self._is_2d:
+            az = 0.0
 
-        elif self._flight_phase == FlightPhase.LIFTING:
-            # Full control, but prevent going below ground
-            if self._pos.z <= 0.0 and az < 0:
-                az = 0.0
+        # ── flight-phase specific physics (3D only) ────
+        if not self._is_2d:
+            if self._flight_phase == FlightPhase.GROUND:
+                # On the ground: dampen horizontal movement, only z matters
+                ax *= (1.0 - self.GROUND_DRAG)
+                ay *= (1.0 - self.GROUND_DRAG)
+                # Prevent going below ground
+                if self._pos.z <= 0.0 and az < 0:
+                    az = 0.0
 
-        elif self._flight_phase == FlightPhase.CRUISING:
-            # Full agent control — no restrictions
-            pass
+            elif self._flight_phase == FlightPhase.LIFTING:
+                # Full control, but prevent going below ground
+                if self._pos.z <= 0.0 and az < 0:
+                    az = 0.0
 
-        elif self._flight_phase == FlightPhase.DESCENDING:
-            # Full agent control during descent
-            pass
+            elif self._flight_phase == FlightPhase.CRUISING:
+                # Full agent control — no restrictions
+                pass
+
+            elif self._flight_phase == FlightPhase.DESCENDING:
+                # Full agent control during descent
+                pass
 
         # Store applied acceleration for observation
         self._accel = Velocity(vx=ax, vy=ay, vz=az)
@@ -416,35 +494,48 @@ class DroneDeliveryEnvironment(Environment):
         # ── apply wind acceleration ──────────
         ax += self._wind.vx
         ay += self._wind.vy
-        az += self._wind.vz
+        if not self._is_2d:
+            az += self._wind.vz
 
         # ── integrate velocity ───────────────
         self._vel.vx = (self._vel.vx + ax * self.DT) * (1 - self.DRAG)
         self._vel.vy = (self._vel.vy + ay * self.DT) * (1 - self.DRAG)
-        self._vel.vz = (self._vel.vz + az * self.DT) * (1 - self.DRAG)
+        if self._is_2d:
+            self._vel.vz = 0.0
+        else:
+            self._vel.vz = (self._vel.vz + az * self.DT) * (1 - self.DRAG)
         self._vel = self._clamp_velocity(self._vel)
 
         # ── integrate position ───────────────
         self._pos.x += self._vel.vx * self.DT
         self._pos.y += self._vel.vy * self.DT
-        self._pos.z += self._vel.vz * self.DT
+        if self._is_2d:
+            self._pos.z = 0.0
+        else:
+            self._pos.z += self._vel.vz * self.DT
 
-        # Clamp to ground (can't go underground)
-        if self._pos.z < 0.0:
+        # Clamp to ground (can't go underground) – 3D only
+        if not self._is_2d and self._pos.z < 0.0:
             self._pos.z = 0.0
             self._vel.vz = 0.0
 
-        # ── update flight phase ──────────────
-        self._update_flight_phase()
+        # ── update flight phase (3D only) ────
+        if not self._is_2d:
+            self._update_flight_phase()
 
         # ── termination checks ───────────────
         reward = self.LIVING_PENALTY
         self._oob = self._check_oob()
         self._collision = self._check_collision()
-        self._delivered = (
-            self._flight_phase == FlightPhase.LANDED
-            or (self._dist_to_target() <= self._delivery_radius and self._pos.z <= 1.0)
-        )
+
+        if self._is_2d:
+            # 2D delivery: just reach within delivery_radius on XY plane
+            self._delivered = self._dist_to_target() <= self._delivery_radius
+        else:
+            self._delivered = (
+                self._flight_phase == FlightPhase.LANDED
+                or (self._dist_to_target() <= self._delivery_radius and self._pos.z <= 1.0)
+            )
 
         if self._oob:
             reward += self.OOB_PENALTY
@@ -453,7 +544,8 @@ class DroneDeliveryEnvironment(Environment):
             reward += self.COLLISION_PENALTY
             self._done = True
         elif self._delivered:
-            self._flight_phase = FlightPhase.LANDED
+            if not self._is_2d:
+                self._flight_phase = FlightPhase.LANDED
             reward += self.DELIVERY_REWARD
             # Smooth landing bonus: reward low speed at delivery
             speed = math.sqrt(self._vel.vx**2 + self._vel.vy**2 + self._vel.vz**2)
@@ -481,21 +573,22 @@ class DroneDeliveryEnvironment(Environment):
                 if dot > 0:
                     reward += self.HEADING_BONUS * dot
 
-            # ── altitude management ──
-            if self._flight_phase == FlightPhase.CRUISING:
-                alt_error = abs(self._pos.z - self._cruise_altitude)
-                if alt_error > 3.0:  # more than 3m off cruise altitude
-                    reward += self.ALT_PENALTY  # encourages altitude hold
-            elif self._flight_phase == FlightPhase.GROUND:
-                if self._pos.z < 0.5 and az > 0:  # trying to lift -> small encouragement
-                    reward += 0.05
+            # ── altitude management (3D only) ──
+            if not self._is_2d:
+                if self._flight_phase == FlightPhase.CRUISING:
+                    alt_error = abs(self._pos.z - self._cruise_altitude)
+                    if alt_error > 3.0:  # more than 3m off cruise altitude
+                        reward += self.ALT_PENALTY  # encourages altitude hold
+                elif self._flight_phase == FlightPhase.GROUND:
+                    if self._pos.z < 0.5 and az > 0:  # trying to lift -> small encouragement
+                        reward += 0.05
 
-            # ── path-following bonus ──
-            if self._on_path_corridor():
+            # ── path-following bonus (3D only) ──
+            if not self._is_2d and self._on_path_corridor():
                 reward += self.PATH_BONUS
 
-            # ── near-miss navigation bonus ──
-            if self._flight_phase in (FlightPhase.CRUISING, FlightPhase.DESCENDING):
+            # ── near-miss navigation bonus (3D only) ──
+            if not self._is_2d and self._flight_phase in (FlightPhase.CRUISING, FlightPhase.DESCENDING):
                 for obs in self._obstacles:
                     dist = _aabb_point_distance(obs, self._pos.x, self._pos.y, self._pos.z)
                     if self.DRONE_RADIUS < dist < self.DRONE_RADIUS + 3.0:
@@ -515,11 +608,13 @@ class DroneDeliveryEnvironment(Environment):
 
         Returns a dict with ``score`` in [0.0, 1.0] and component scores.
         Must be called after the episode is done (``self._done == True``).
+
+        Also saves a JSON result file to the Tasks/ directory.
         """
         speed = math.sqrt(
             self._vel.vx ** 2 + self._vel.vy ** 2 + self._vel.vz ** 2
         )
-        result = EpisodeResult(
+        episode_result = EpisodeResult(
             delivered=self._delivered,
             collision=self._collision,
             out_of_bounds=self._oob,
@@ -532,7 +627,21 @@ class DroneDeliveryEnvironment(Environment):
             landing_speed=speed if self._delivered else 0.0,
             delivery_radius=self._delivery_radius,
         )
-        return grade_task(self._task_id or "", result)
+        grade_result = grade_task(self._task_id or "task_1_easy", episode_result)
+
+        # ── Save JSON result to Tasks/ directory ──
+        try:
+            filepath = save_task_result(
+                task_id=self._task_id or "task_1_easy",
+                episode_id=self._state.episode_id,
+                grade_result=grade_result,
+                episode_result=episode_result,
+            )
+            grade_result["result_file"] = filepath
+        except Exception:
+            pass  # Don't break grading if file write fails
+
+        return grade_result
 
     def reset_from_task(self, task: TaskDefinition) -> DroneObservation:
         """
@@ -545,6 +654,7 @@ class DroneDeliveryEnvironment(Environment):
         self._delivery_radius = task.delivery_radius
         self._max_steps = task.max_steps
         self._rng = random.Random(task.seed)
+        self._is_2d = getattr(task, 'movement_mode', '3d') == '2d'
 
         # Set wind from task definition
         if hasattr(task, 'wind') and task.wind:
@@ -571,8 +681,12 @@ class DroneDeliveryEnvironment(Environment):
     def cruise_altitude(self) -> float:
         return self._cruise_altitude
 
+    @property
+    def is_2d(self) -> bool:
+        return self._is_2d
+
     # ──────────────────────────────────────────
-    #  Flight phase management
+    #  Flight phase management (3D only)
     # ──────────────────────────────────────────
 
     def _update_flight_phase(self):
@@ -795,11 +909,16 @@ class DroneDeliveryEnvironment(Environment):
 
     def _check_oob(self) -> bool:
         ws = self._world_size
+        if self._is_2d:
+            return not (0 <= self._pos.x <= ws and
+                        0 <= self._pos.y <= ws)
         return not (0 <= self._pos.x <= ws and
                     0 <= self._pos.y <= ws and
                     0 <= self._pos.z <= ws)
 
     def _dist_to_target(self) -> float:
+        if self._is_2d:
+            return self._horizontal_dist_to_target()
         return self._euclidean(self._pos, self._target)
 
     def _horizontal_dist_to_target(self) -> float:
@@ -811,15 +930,15 @@ class DroneDeliveryEnvironment(Environment):
     def _target_direction(self) -> Tuple[float, float, float]:
         dx = self._target.x - self._pos.x
         dy = self._target.y - self._pos.y
-        dz = self._target.z - self._pos.z
+        dz = 0.0 if self._is_2d else (self._target.z - self._pos.z)
         mag = math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-8
         return (dx/mag, dy/mag, dz/mag)
 
     def _make_observation(self, reward: float) -> DroneObservation:
         nearby = self._nearby_obstacles()
         min_dist = nearby[0].distance if nearby else float("inf")
-        wp = self._current_waypoint()
-        remaining_path = max(0, len(self._path) - self._waypoint_idx)
+        wp = self._current_waypoint() if not self._is_2d else None
+        remaining_path = max(0, len(self._path) - self._waypoint_idx) if not self._is_2d else 0
 
         return DroneObservation(
             position=Position(**self._pos.model_dump()),
@@ -851,6 +970,8 @@ class DroneDeliveryEnvironment(Environment):
                 ),
                 "flight_phase": self._flight_phase.value,
                 "cruise_altitude": self._cruise_altitude,
+                "movement_mode": "2d" if self._is_2d else "3d",
+                "task_id": self._task_id,
                 "wind": {
                     "wx": self._wind.vx,
                     "wy": self._wind.vy,

@@ -4,6 +4,12 @@ example_usage.py
 Demonstrates how to interact with the Drone Delivery environment
 both directly (in-process) and via HTTP client.
 
+Tasks:
+  task_1_easy   — 2D ground-level direct flight (XY only)
+  task_2_medium — 3D full flight phases, no obstacles
+  task_3_hard   — 3D dense obstacles
+  task_4_expert — 3D obstacles + wind
+
 The drone follows a flight-phase-aware policy:
   GROUND     → thrust upward to lift off
   LIFTING    → continue ascending until cruise altitude, start horizontal
@@ -29,6 +35,7 @@ import requests
 
 from environment import DroneDeliveryEnvironment
 from models import DroneAction, FlightPhase
+from grader import TASK_CONFIGS
 
 
 
@@ -37,14 +44,14 @@ from models import DroneAction, FlightPhase
 #  In-process usage
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_local_episode(num_steps: int = 1000, seed: int = 42):
+def run_local_episode(num_steps: int = 1000, seed: int = 42, task_id: str = "task_2_medium"):
     """Run one episode directly against the Python environment object."""
 
     print("=" * 70)
-    print("LOCAL in-process episode  (Flight-Phase Aware)")
+    print(f"LOCAL in-process episode  (task={task_id})")
     print("=" * 70)
 
-    env = DroneDeliveryEnvironment(num_obstacles=12, seed=seed)
+    env = DroneDeliveryEnvironment(task_id=task_id)
     obs = env.reset()
 
     print(f"Start        : ({obs.position.x:.1f}, {obs.position.y:.1f}, {obs.position.z:.1f})")
@@ -52,15 +59,25 @@ def run_local_episode(num_steps: int = 1000, seed: int = 42):
     print(f"Distance     : {obs.distance_to_target:.2f} m")
     print(f"Cruise Alt   : {obs.cruise_altitude:.1f} m")
     print(f"Flight Phase : {obs.flight_phase}")
+    print(f"Movement     : {obs.metadata.get('movement_mode', '3d').upper()}")
     print(f"A* path      : {obs.path_length} waypoints")
     print(f"Obstacles    : {obs.metadata.get('num_obstacles', 0)}")
     print()
 
     total_reward = 0.0
+    is_2d = obs.metadata.get('movement_mode', '3d') == '2d'
+
     for step_idx in range(num_steps):
         phase = obs.flight_phase
 
-        if phase == FlightPhase.GROUND.value:
+        if is_2d:
+            # ── 2D MODE: steer towards target on XY plane ──
+            td = obs.target_direction
+            ax = td[0] * 4.0
+            ay = td[1] * 4.0
+            az = 0.0
+
+        elif phase == FlightPhase.GROUND.value:
             # ── GROUND: thrust upward to lift off ──
             ax, ay, az = 0.0, 0.0, 5.0  # full upward thrust
 
@@ -169,8 +186,9 @@ def run_remote_episode(base_url: str, num_steps: int = 1000):
 
     params = {"session_id": session_id}
 
-    # Reset
-    r = requests.post(f"{base_url}/reset", params=params, timeout=10)
+    # Reset with a task
+    reset_body = {"task_id": "task_2_medium"}
+    r = requests.post(f"{base_url}/reset", params=params, json=reset_body, timeout=10)
     obs = r.json()
     print(f"Start        : {obs['position']}")
     print(f"Target       : {obs['target_position']}")
@@ -269,9 +287,12 @@ if __name__ == "__main__":
     parser.add_argument("--url", default=os.getenv("SERVER_URL", "http://localhost:8000"))
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--task", default="task_2_medium",
+                        choices=list(TASK_CONFIGS.keys()),
+                        help="Task to run")
     args = parser.parse_args()
 
     if args.remote:
         run_remote_episode(args.url, args.steps)
     else:
-        run_local_episode(args.steps, args.seed)
+        run_local_episode(args.steps, args.seed, task_id=args.task)

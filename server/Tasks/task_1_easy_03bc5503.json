@@ -1,0 +1,78 @@
+{
+  "task_id": "task_1_easy",
+  "name": "Direct Flight",
+  "description": "Move directly towards the target on a 2D ground plane (X-Y only). No obstacles, no liftoff required. Tests basic 2D navigation.",
+  "difficulty": "easy",
+  "max_steps": 500,
+  "world_size": 100.0,
+  "start": [
+    10,
+    10
+  ],
+  "target": [
+    80,
+    80
+  ],
+  "num_obstacles": 0,
+  "delivery_radius": 5.0,
+  "movement_mode": "2d",
+  "wind": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "seed": 1001,
+  "target_score_min": 0.7,
+  "target_score_max": 1.0,
+  "action_schema": {
+    "ax": "float \u2014 acceleration along X axis (m/s\u00b2), range [-5.0, 5.0]",
+    "ay": "float \u2014 acceleration along Y axis (m/s\u00b2), range [-5.0, 5.0]",
+    "az": "fixed at 0.0 \u2014 2D mode, no vertical control"
+  },
+  "observation_space": {
+    "position": "dict \u2014 {x, y, z} current drone position in metres",
+    "velocity": "dict \u2014 {vx, vy, vz} current drone velocity in m/s",
+    "target_position": "dict \u2014 {x, y, z} delivery target position",
+    "distance_to_target": "float \u2014 Euclidean distance to target (m)",
+    "target_direction": "list \u2014 unit vector [3] pointing towards target",
+    "nearby_obstacles": "list \u2014 obstacles within 25m sensor range",
+    "done": "bool \u2014 whether the episode has ended",
+    "reward": "float \u2014 per-step reward signal",
+    "steps_remaining": "int \u2014 steps until episode timeout"
+  },
+  "grader": {
+    "delivery_weight": 0.35,
+    "progress_weight": 0.35,
+    "efficiency_weight": 0.2,
+    "safety_weight": 0.08,
+    "smoothness_weight": 0.02,
+    "description": "Scores delivery success, distance progress, step efficiency, collision avoidance (safety), and landing smoothness"
+  },
+  "success_criteria": [
+    "Reach the delivery target within 5.0 metres (2D distance)",
+    "Stay within the 100m world bounds",
+    "Complete within 500 steps",
+    "Achieve a score of at least 0.7"
+  ],
+  "episode_id": "03bc5503-a8a0-468b-a38a-dd2cba908654",
+  "episode_result": {
+    "delivered": true,
+    "collision": false,
+    "out_of_bounds": false,
+    "timed_out": false,
+    "final_dist": 4.7968,
+    "initial_dist": 98.9949,
+    "steps_used": 224,
+    "max_steps": 500,
+    "total_reward": 385.6661,
+    "landing_speed": 5.2816,
+    "score": 0.816,
+    "components": {
+      "delivery": 1.0,
+      "progress": 0.9515,
+      "efficiency": 0.2651,
+      "safety": 1.0,
+      "smoothness": 0.0
+    }
+  }
+}

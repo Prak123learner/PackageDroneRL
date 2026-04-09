@@ -46,7 +46,7 @@
       </div>
       <label class="api-url-wrapper">
         <span>API</span>
-        <input type="text" id="api-url" value="https://prototype05-droneenv2.hf.space" spellcheck="false" />
+        <input type="text" id="api-url" value="http://localhost:7860" spellcheck="false" />
       </label>
     </div>
   </header>
@@ -55,6 +55,38 @@
   <main id="app-main">
     <!-- LEFT PANEL – Controls -->
     <aside id="controls-panel">
+
+      <!-- Task Selector Card -->
+      <section class="card" id="task-selector-card">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" />
+            <rect x="9" y="3" width="6" height="4" rx="1" />
+            <path d="M9 14l2 2 4-4" />
+          </svg>
+          <h2>Task Selection</h2>
+        </div>
+        <div class="card-body">
+          <div class="field-group">
+            <label class="field-label">Active Task</label>
+            <select id="task-select" style="width:100%;padding:8px 12px;border-radius:8px;background:var(--surface-2);color:var(--text-primary);border:1px solid var(--border);font-size:0.85rem;font-family:inherit;cursor:pointer;">
+              <option value="">— Loading tasks… —</option>
+            </select>
+          </div>
+          <div id="task-info" style="margin-top:10px;display:none;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+              <span id="task-difficulty-badge" class="difficulty-badge" style="padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;"></span>
+              <span id="task-movement-badge" class="movement-badge" style="padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;background:rgba(99,102,241,0.15);color:#818cf8;"></span>
+            </div>
+            <p id="task-description" style="font-size:0.78rem;color:var(--text-secondary);line-height:1.45;margin:0;"></p>
+            <div style="display:flex;gap:12px;margin-top:8px;font-size:0.72rem;color:var(--text-muted);">
+              <span>🎯 <span id="task-max-steps">—</span> steps</span>
+              <span>📏 <span id="task-delivery-radius">—</span>m radius</span>
+              <span>🌍 <span id="task-world-size">—</span>m world</span>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <!-- Location Config Card -->
       <section class="card" id="location-card">
@@ -77,7 +109,7 @@
                 <span class="axis-tag y">Y</span>
                 <input type="number" id="start-y" value="10" step="1" />
               </div>
-              <div class="xyz-field">
+              <div class="xyz-field" id="start-z-field">
                 <span class="axis-tag z">Z</span>
                 <input type="number" id="start-z" value="0" step="1" />
               </div>
@@ -94,7 +126,7 @@
                 <span class="axis-tag y">Y</span>
                 <input type="number" id="end-y" value="180" step="1" />
               </div>
-              <div class="xyz-field">
+              <div class="xyz-field" id="end-z-field">
                 <span class="axis-tag z">Z</span>
                 <input type="number" id="end-z" value="0" step="1" />
               </div>
@@ -136,7 +168,7 @@
             </div>
             <input type="range" id="ay" min="-5" max="5" step="0.1" value="0" />
           </div>
-          <div class="slider-group">
+          <div class="slider-group" id="az-slider-group">
             <div class="slider-header">
               <label>a<sub>z</sub></label>
               <output id="az-val">0.0</output>
@@ -388,6 +420,31 @@
         </div>
       </section>
 
+      <!-- Wind Conditions Card (auto-hides when no wind) -->
+      <section class="card" id="wind-info-card" style="display:none;">
+        <div class="card-header">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9.59 4.59A2 2 0 1 1 11 8H2" />
+            <path d="M12.59 19.41A2 2 0 1 0 14 16H2" />
+            <path d="M17.73 7.73A2.5 2.5 0 1 1 19.5 12H2" />
+          </svg>
+          <h2>Wind Conditions</h2>
+        </div>
+        <div class="card-body">
+          <div class="wind-display">
+            <div class="wind-speed-gauge">
+              <div class="wind-gauge-label">Speed</div>
+              <div class="wind-gauge-value" id="telem-wind-speed">0.0 m/s²</div>
+            </div>
+            <div class="wind-direction-info">
+              <div class="wind-gauge-label">Direction</div>
+              <div class="wind-gauge-value" id="telem-wind-dir">Calm</div>
+            </div>
+          </div>
+          <p class="wind-hint">⚠ Wind pushes the drone off course. Compensate with opposing acceleration.</p>
+        </div>
+      </section>
+
       <section class="card" id="reward-chart-card">
         <div class="card-header">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -419,8 +476,8 @@
   <!-- ── Event log toast area ── -->
   <div id="toast-area"></div>
 
-  <script src="/static/renderer.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/renderer.js?v=3"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 
 </html>

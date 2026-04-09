@@ -24,6 +24,7 @@ class DroneRenderer {
     this.camDist  = 400;
     this.camTarget = { x: 100, y: 100, z: 15 };
     this.viewMode = 'perspective'; // 'perspective' | 'top' | 'side'
+    this.renderMode = '3d';        // '2d' | '3d' — set by setMode()
 
     // World data
     this.worldSize = 200;
@@ -37,6 +38,7 @@ class DroneRenderer {
     this.maxTrail = 500;
     this.flightPhase = 'GROUND';
     this.cruiseAltitude = 15;
+    this.wind = { wx: 0, wy: 0, wz: 0 };  // wind vector for indicator
 
     // Animation
     this._frame = 0;
@@ -79,6 +81,15 @@ class DroneRenderer {
 
   updateFlightPhase(phase) { this.flightPhase = phase || 'GROUND'; }
   updateCruiseAltitude(alt) { this.cruiseAltitude = alt || 15; }
+  updateWind(wind) { this.wind = wind || { wx: 0, wy: 0, wz: 0 }; }
+
+  /** Switch between '2d' (flat XY graph) and '3d' (perspective) render modes */
+  setMode(mode) {
+    this.renderMode = mode;
+    if (mode === '2d') {
+      this.viewMode = 'top';
+    }
+  }
 
   setView(mode) {
     this.viewMode = mode;
@@ -132,7 +143,11 @@ class DroneRenderer {
 
   _animate() {
     this._frame++;
-    this._draw();
+    if (this.renderMode === '2d') {
+      this._draw2D();
+    } else {
+      this._draw();
+    }
     this._animId = requestAnimationFrame(() => this._animate());
   }
 
@@ -161,6 +176,281 @@ class DroneRenderer {
     this._drawDrone(ctx);
     this._drawSensorRing(ctx);
     this._drawCompass(ctx, W, H);
+    this._drawWindIndicator(ctx, W, H);
+  }
+
+  /* ── 2D Flat XY Graph Renderer (for task_1_easy) ──────────────────────── */
+
+  _draw2D() {
+    const ctx = this.ctx;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    // Background – subtle dark gradient
+    const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, W*0.7);
+    bg.addColorStop(0, '#0f1118');
+    bg.addColorStop(1, '#090a0f');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // Determine graph bounds with padding
+    const pad = 50;
+    const graphW = W - pad * 2;
+    const graphH = H - pad * 2;
+    const ws = this.worldSize;
+
+    // Map world coords to screen
+    const toSX = (x) => pad + (x / ws) * graphW;
+    const toSY = (y) => H - pad - (y / ws) * graphH;  // flip Y
+
+    // ── Grid ──
+    const gridStep = ws <= 100 ? 10 : 20;
+    ctx.strokeStyle = 'rgba(99, 102, 241, 0.07)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= ws; i += gridStep) {
+      // Vertical grid lines (X)
+      ctx.beginPath();
+      ctx.moveTo(toSX(i), toSY(0));
+      ctx.lineTo(toSX(i), toSY(ws));
+      ctx.stroke();
+      // Horizontal grid lines (Y)
+      ctx.beginPath();
+      ctx.moveTo(toSX(0), toSY(i));
+      ctx.lineTo(toSX(ws), toSY(i));
+      ctx.stroke();
+    }
+
+    // ── Axis labels ──
+    ctx.font = '500 10px Inter, sans-serif';
+    ctx.fillStyle = 'rgba(176, 181, 201, 0.5)';
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= ws; i += gridStep) {
+      // X axis labels (bottom)
+      ctx.fillText(i, toSX(i), H - pad + 16);
+      // Y axis labels (left)
+      ctx.textAlign = 'right';
+      ctx.fillText(i, pad - 8, toSY(i) + 4);
+      ctx.textAlign = 'center';
+    }
+
+    // Axis titles
+    ctx.font = '600 12px Inter, sans-serif';
+    ctx.fillStyle = '#fb7185';
+    ctx.textAlign = 'center';
+    ctx.fillText('X (metres)', W / 2, H - 8);
+    ctx.save();
+    ctx.translate(14, H / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = '#34d399';
+    ctx.fillText('Y (metres)', 0, 0);
+    ctx.restore();
+
+    // ── World boundary box ──
+    ctx.strokeStyle = 'rgba(99, 102, 241, 0.2)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(toSX(0), toSY(ws), graphW, graphH);
+    ctx.setLineDash([]);
+
+    // ── Obstacles (if any) ──
+    for (const obs of this.obstacles) {
+      const ox = obs.position?.x ?? obs.x;
+      const oy = obs.position?.y ?? obs.y;
+      const sx = obs.size_x || 2;
+      const sy = obs.size_y || 2;
+      const isNearby = this.nearbyObs.some(n => n.id === obs.id);
+
+      const screenX = toSX(ox - sx/2);
+      const screenY = toSY(oy + sy/2);
+      const screenW = (sx / ws) * graphW;
+      const screenH = (sy / ws) * graphH;
+
+      ctx.fillStyle = isNearby ? 'rgba(244, 63, 94, 0.5)' : 'rgba(120, 113, 170, 0.35)';
+      ctx.strokeStyle = isNearby ? 'rgba(244, 63, 94, 0.7)' : 'rgba(99, 102, 241, 0.25)';
+      ctx.lineWidth = 1;
+      ctx.fillRect(screenX, screenY, screenW, screenH);
+      ctx.strokeRect(screenX, screenY, screenW, screenH);
+    }
+
+    // ── Trail ──
+    if (this.trail.length > 1) {
+      ctx.lineWidth = 2.5;
+      for (let i = 1; i < this.trail.length; i++) {
+        const t = this.trail[i];
+        const prev = this.trail[i - 1];
+        const alpha = (i / this.trail.length) * 0.85 + 0.15;
+        ctx.strokeStyle = `rgba(99, 102, 241, ${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(toSX(prev.x), toSY(prev.y));
+        ctx.lineTo(toSX(t.x), toSY(t.y));
+        ctx.stroke();
+      }
+    }
+
+    // ── Target ──
+    if (this.targetPos) {
+      const tx = toSX(this.targetPos.x);
+      const ty = toSY(this.targetPos.y);
+      const pulse = 0.5 + 0.5 * Math.sin(this._frame * 0.06);
+      const r = 10 + pulse * 4;
+
+      // Glow ring
+      const glow = ctx.createRadialGradient(tx, ty, 0, tx, ty, r * 2.5);
+      glow.addColorStop(0, `rgba(16, 185, 129, ${0.3 + pulse * 0.15})`);
+      glow.addColorStop(1, 'rgba(16, 185, 129, 0)');
+      ctx.fillStyle = glow;
+      ctx.fillRect(tx - r * 2.5, ty - r * 2.5, r * 5, r * 5);
+
+      // Target circle
+      ctx.beginPath();
+      ctx.arc(tx, ty, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(16, 185, 129, ${0.4 + pulse * 0.3})`;
+      ctx.fill();
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Crosshair
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.5)';
+      ctx.lineWidth = 1;
+      const cr = r * 1.8;
+      ctx.beginPath(); ctx.moveTo(tx - cr, ty); ctx.lineTo(tx + cr, ty); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(tx, ty - cr); ctx.lineTo(tx, ty + cr); ctx.stroke();
+
+      // Label
+      ctx.fillStyle = '#34d399';
+      ctx.font = '600 10px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('TARGET', tx, ty + r + 16);
+      ctx.textAlign = 'start';
+    }
+
+    // ── Drone ──
+    if (this.dronePos) {
+      const dx = toSX(this.dronePos.x);
+      const dy = toSY(this.dronePos.y);
+      const s = 10;
+
+      // Glow
+      const droneGlow = ctx.createRadialGradient(dx, dy, 0, dx, dy, s * 3);
+      droneGlow.addColorStop(0, 'rgba(99, 102, 241, 0.35)');
+      droneGlow.addColorStop(1, 'rgba(99, 102, 241, 0)');
+      ctx.fillStyle = droneGlow;
+      ctx.fillRect(dx - s * 3, dy - s * 3, s * 6, s * 6);
+
+      // Drone body
+      ctx.beginPath();
+      ctx.arc(dx, dy, s, 0, Math.PI * 2);
+      ctx.fillStyle = '#6366f1';
+      ctx.fill();
+      ctx.strokeStyle = '#818cf8';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Inner highlight
+      ctx.beginPath();
+      ctx.arc(dx - 2, dy - 2, s * 0.3, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fill();
+
+      // Velocity vector arrow
+      if (this.droneVel) {
+        const vx = this.droneVel.vx || 0;
+        const vy = this.droneVel.vy || 0;
+        const vMag = Math.sqrt(vx * vx + vy * vy);
+        if (vMag > 0.3) {
+          const arrowLen = Math.min(40, vMag * 4);
+          const angle = Math.atan2(-vy, vx);  // negate vy because screen Y is flipped
+          const ax = dx + Math.cos(angle) * (s + 4);
+          const ay = dy + Math.sin(angle) * (s + 4);
+          const bx = dx + Math.cos(angle) * (s + 4 + arrowLen);
+          const by = dy + Math.sin(angle) * (s + 4 + arrowLen);
+
+          ctx.strokeStyle = 'rgba(6, 182, 212, 0.7)';
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+
+          // Arrow head
+          const headLen = 6;
+          const ha1 = angle + Math.PI * 0.8;
+          const ha2 = angle - Math.PI * 0.8;
+          ctx.beginPath();
+          ctx.moveTo(bx, by);
+          ctx.lineTo(bx + Math.cos(ha1) * headLen, by + Math.sin(ha1) * headLen);
+          ctx.moveTo(bx, by);
+          ctx.lineTo(bx + Math.cos(ha2) * headLen, by + Math.sin(ha2) * headLen);
+          ctx.stroke();
+        }
+      }
+
+      // Label
+      ctx.fillStyle = '#c7d2fe';
+      ctx.font = '700 10px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('DRONE', dx, dy - s - 8);
+      ctx.textAlign = 'start';
+    }
+
+    // ── Distance line (drone → target) ──
+    if (this.dronePos && this.targetPos) {
+      const dx = toSX(this.dronePos.x);
+      const dy = toSY(this.dronePos.y);
+      const tx = toSX(this.targetPos.x);
+      const ty = toSY(this.targetPos.y);
+
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.2)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath(); ctx.moveTo(dx, dy); ctx.lineTo(tx, ty); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Distance label at midpoint
+      const mx = (dx + tx) / 2;
+      const my = (dy + ty) / 2;
+      const dist2d = Math.sqrt(
+        (this.dronePos.x - this.targetPos.x) ** 2 +
+        (this.dronePos.y - this.targetPos.y) ** 2
+      );
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.6)';
+      ctx.font = '500 9px JetBrains Mono, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${dist2d.toFixed(1)}m`, mx, my - 6);
+      ctx.textAlign = 'start';
+    }
+
+    // ── Mode badge ──
+    ctx.fillStyle = 'rgba(6, 182, 212, 0.15)';
+    const badgeW = 80, badgeH = 24;
+    const br = 8;
+    ctx.beginPath();
+    ctx.roundRect(W - pad - badgeW, pad - badgeH - 8, badgeW, badgeH, br);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(6, 182, 212, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#06b6d4';
+    ctx.font = '700 10px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('2D MODE', W - pad - badgeW / 2, pad - badgeH / 2 - 4);
+    ctx.textAlign = 'start';
+
+    // ── Scale bar ──
+    const scaleM = gridStep;
+    const scaleW2 = (scaleM / ws) * graphW;
+    const sx2 = pad + 10;
+    const sy2 = H - pad + 32;
+    ctx.strokeStyle = 'rgba(176, 181, 201, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(sx2, sy2); ctx.lineTo(sx2 + scaleW2, sy2); ctx.stroke();
+    // Endcaps
+    ctx.beginPath(); ctx.moveTo(sx2, sy2 - 3); ctx.lineTo(sx2, sy2 + 3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx2 + scaleW2, sy2 - 3); ctx.lineTo(sx2 + scaleW2, sy2 + 3); ctx.stroke();
+    ctx.fillStyle = 'rgba(176, 181, 201, 0.5)';
+    ctx.font = '500 9px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${scaleM}m`, sx2 + scaleW2 / 2, sy2 + 14);
+    ctx.textAlign = 'start';
   }
 
   _drawGrid(ctx) {
@@ -594,6 +884,123 @@ class DroneRenderer {
       ctx.fillText(d.label, tx, ty);
     }
     ctx.textBaseline = 'alphabetic';
+  }
+
+  /* ── Wind indicator (shown when wind is active, e.g. task_4_expert) ───── */
+
+  _drawWindIndicator(ctx, W, H) {
+    const wx = this.wind.wx || 0;
+    const wy = this.wind.wy || 0;
+    const wz = this.wind.wz || 0;
+    const speed = Math.sqrt(wx * wx + wy * wy + wz * wz);
+    if (speed < 0.01) return;  // no wind → nothing to draw
+
+    // Position: top-right area of the canvas
+    const cx = W - 70;
+    const cy = 80;
+    const outerR = 35;
+    const innerR = 8;
+
+    // Panel background
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(cx - outerR - 14, cy - outerR - 20, (outerR + 14) * 2, (outerR + 14) * 2 + 30, 12);
+    ctx.fillStyle = 'rgba(10, 11, 17, 0.75)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Title
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.8)';
+    ctx.font = '600 9px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('WIND', cx, cy - outerR - 6);
+
+    // Outer compass ring
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, outerR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Tick marks
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.25)';
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
+      const x1 = cx + Math.cos(a) * (outerR - 4);
+      const y1 = cy + Math.sin(a) * (outerR - 4);
+      const x2 = cx + Math.cos(a) * outerR;
+      const y2 = cy + Math.sin(a) * outerR;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+
+    // Wind direction arrow (pointing where wind blows TO)
+    const windAngle = Math.atan2(wy, wx);  // angle in radians
+    const arrowLen = outerR - 6;
+    const tipX = cx + Math.cos(windAngle) * arrowLen;
+    const tipY = cy + Math.sin(windAngle) * arrowLen;
+
+    // Arrow shaft with gradient
+    const arrowGrad = ctx.createLinearGradient(cx, cy, tipX, tipY);
+    arrowGrad.addColorStop(0, 'rgba(245, 158, 11, 0.3)');
+    arrowGrad.addColorStop(1, 'rgba(245, 158, 11, 0.9)');
+    ctx.strokeStyle = arrowGrad;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+
+    // Arrow head
+    const headLen = 10;
+    const ha1 = windAngle + Math.PI * 0.78;
+    const ha2 = windAngle - Math.PI * 0.78;
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.9)';
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX + Math.cos(ha1) * headLen, tipY + Math.sin(ha1) * headLen);
+    ctx.lineTo(tipX + Math.cos(ha2) * headLen, tipY + Math.sin(ha2) * headLen);
+    ctx.closePath();
+    ctx.fill();
+
+    // Centre dot
+    ctx.beginPath();
+    ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.2)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Speed label
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = '700 11px JetBrains Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${speed.toFixed(1)} m/s²`, cx, cy + outerR + 18);
+
+    // Direction label
+    const dirLabel = this._windDirectionLabel(wx, wy);
+    ctx.font = '500 9px Inter, sans-serif';
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.6)';
+    ctx.fillText(dirLabel, cx, cy + outerR + 30);
+
+    ctx.restore();
+  }
+
+  _windDirectionLabel(wx, wy) {
+    if (Math.abs(wx) < 0.01 && Math.abs(wy) < 0.01) return 'Calm';
+    const angle = Math.atan2(wy, wx) * 180 / Math.PI;  // 0=E, 90=S
+    // Wind direction = where it blows FROM (opposite of vector)
+    if (angle >= -22.5 && angle < 22.5)   return 'Eastward →';
+    if (angle >= 22.5 && angle < 67.5)    return 'SE ↘';
+    if (angle >= 67.5 && angle < 112.5)   return 'Southward ↓';
+    if (angle >= 112.5 && angle < 157.5)  return 'SW ↙';
+    if (angle >= 157.5 || angle < -157.5) return 'Westward ←';
+    if (angle >= -157.5 && angle < -112.5) return 'NW ↖';
+    if (angle >= -112.5 && angle < -67.5) return 'Northward ↑';
+    if (angle >= -67.5 && angle < -22.5)  return 'NE ↗';
+    return '';
   }
 
   /* ── Interaction ────────────────────────────────────────────────────── */

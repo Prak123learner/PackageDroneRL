@@ -13,11 +13,26 @@
   const apiUrlInput   = $('api-url');
   const connBadge     = $('connection-badge');
 
+  // Task selector
+  const taskSelect     = $('task-select');
+  const taskInfo       = $('task-info');
+  const taskDiffBadge  = $('task-difficulty-badge');
+  const taskMoveBadge  = $('task-movement-badge');
+  const taskDesc       = $('task-description');
+  const taskMaxSteps   = $('task-max-steps');
+  const taskDelivRadius = $('task-delivery-radius');
+  const taskWorldSize  = $('task-world-size');
+
   // Locations
   const startX = $('start-x'), startY = $('start-y'), startZ = $('start-z');
   const endX   = $('end-x'),   endY   = $('end-y'),   endZ   = $('end-z');
   const numObsInput   = $('num-obstacles');
   const seedInput     = $('seed');
+
+  // Z-axis fields (hidden in 2D mode)
+  const startZField = $('start-z-field');
+  const endZField   = $('end-z-field');
+  const azSliderGroup = $('az-slider-group');
 
   // Acceleration sliders
   const axSlider = $('ax'), aySlider = $('ay'), azSlider = $('az');
@@ -74,6 +89,11 @@
   // Reward chart
   const rewardCanvas = $('reward-chart');
 
+  // Wind telemetry
+  const telemWindSpeed = $('telem-wind-speed');
+  const telemWindDir   = $('telem-wind-dir');
+  const windInfoCard   = $('wind-info-card');
+
   // Flight phase steps
   const phaseSteps = ['GROUND', 'LIFTING', 'CRUISING', 'DESCENDING', 'LANDED'];
   const phaseElements = {
@@ -95,6 +115,9 @@
   let customObstacles = [];      // user-defined obstacles for reset
   let rewardHistory = [];
   let totalRewardAcc = 0;
+  let availableTasks = [];       // loaded from /tasks
+  let selectedTaskId = '';       // currently selected task_id
+  let currentMovementMode = '3d'; // '2d' or '3d'
 
   // ────────────────────────────────────────────────────────────────────────
   //  Helpers
@@ -143,6 +166,113 @@
   }
 
   // ────────────────────────────────────────────────────────────────────────
+  //  Task management
+  // ────────────────────────────────────────────────────────────────────────
+  const DIFFICULTY_COLORS = {
+    easy:   { bg: 'rgba(34,197,94,0.15)',  color: '#22c55e' },
+    medium: { bg: 'rgba(250,204,21,0.15)', color: '#facc15' },
+    hard:   { bg: 'rgba(249,115,22,0.15)', color: '#f97316' },
+    expert: { bg: 'rgba(239,68,68,0.15)',  color: '#ef4444' },
+  };
+
+  async function fetchTasks() {
+    try {
+      const data = await api('GET', '/tasks');
+      availableTasks = data.tasks || [];
+      populateTaskSelect();
+    } catch (e) {
+      console.warn('Could not fetch tasks:', e);
+      // Fallback: populate with known task IDs
+      availableTasks = [
+        { task_id: 'task_1_easy',   name: 'Direct Flight',   difficulty: 'easy',   movement_mode: '2d', description: '2D ground-level flight', max_steps: 500, delivery_radius: 5.0, world_size: 100 },
+        { task_id: 'task_2_medium', name: 'Vertical Mission', difficulty: 'medium', movement_mode: '3d', description: '3D full flight phases', max_steps: 1000, delivery_radius: 3.0, world_size: 200 },
+        { task_id: 'task_3_hard',   name: 'Obstacle Course',  difficulty: 'hard',   movement_mode: '3d', description: '3D with dense obstacles', max_steps: 1500, delivery_radius: 2.0, world_size: 200 },
+        { task_id: 'task_4_expert', name: 'Storm Run',        difficulty: 'expert', movement_mode: '3d', description: '3D obstacles + wind', max_steps: 1500, delivery_radius: 1.5, world_size: 200 },
+      ];
+      populateTaskSelect();
+    }
+  }
+
+  function populateTaskSelect() {
+    taskSelect.innerHTML = '';
+    for (const t of availableTasks) {
+      const opt = document.createElement('option');
+      opt.value = t.task_id;
+      const diffLabel = t.difficulty ? ` [${t.difficulty.toUpperCase()}]` : '';
+      const modeLabel = t.movement_mode === '2d' ? ' (2D)' : ' (3D)';
+      opt.textContent = `${t.name}${diffLabel}${modeLabel}`;
+      taskSelect.appendChild(opt);
+    }
+    // Select first task by default
+    if (availableTasks.length > 0) {
+      taskSelect.value = availableTasks[0].task_id;
+      onTaskSelected(availableTasks[0].task_id);
+    }
+  }
+
+  function onTaskSelected(taskId) {
+    selectedTaskId = taskId;
+    const task = availableTasks.find(t => t.task_id === taskId);
+    if (!task) {
+      taskInfo.style.display = 'none';
+      return;
+    }
+
+    taskInfo.style.display = 'block';
+
+    // Difficulty badge
+    const dc = DIFFICULTY_COLORS[task.difficulty] || DIFFICULTY_COLORS.easy;
+    taskDiffBadge.textContent = task.difficulty;
+    taskDiffBadge.style.background = dc.bg;
+    taskDiffBadge.style.color = dc.color;
+
+    // Movement mode badge
+    const is2d = task.movement_mode === '2d';
+    currentMovementMode = task.movement_mode || '3d';
+    taskMoveBadge.textContent = is2d ? '2D' : '3D';
+    taskMoveBadge.style.background = is2d ? 'rgba(6,182,212,0.15)' : 'rgba(99,102,241,0.15)';
+    taskMoveBadge.style.color = is2d ? '#06b6d4' : '#818cf8';
+
+    // Switch renderer between 2D graph and 3D perspective
+    if (renderer) {
+      renderer.setMode(is2d ? '2d' : '3d');
+      renderer.worldSize = task.world_size || 200;
+    }
+
+    // Description & stats
+    taskDesc.textContent = task.description || '';
+    taskMaxSteps.textContent = task.max_steps || '—';
+    taskDelivRadius.textContent = task.delivery_radius || '—';
+    taskWorldSize.textContent = task.world_size || '—';
+
+    // Toggle 2D/3D UI elements
+    toggle2D3DMode(is2d);
+  }
+
+  function toggle2D3DMode(is2d) {
+    // Hide/show Z-axis controls
+    if (startZField) startZField.style.display = is2d ? 'none' : '';
+    if (endZField) endZField.style.display = is2d ? 'none' : '';
+    if (azSliderGroup) azSliderGroup.style.display = is2d ? 'none' : '';
+
+    // Reset az to 0 in 2D mode
+    if (is2d && azSlider) {
+      azSlider.value = 0;
+      azVal.textContent = '0.0';
+    }
+
+    // Hide/show flight phase bar in 2D mode
+    const phaseBar = $('flight-phase-bar');
+    if (phaseBar) phaseBar.style.display = is2d ? 'none' : '';
+
+    // Update Liftoff chip visibility
+    const liftoffBtn = $('btn-liftoff');
+    const descendBtn = $('btn-descend');
+    if (liftoffBtn) liftoffBtn.style.display = is2d ? 'none' : '';
+    if (descendBtn) descendBtn.style.display = is2d ? 'none' : '';
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
   //  Update flight phase indicator
   // ────────────────────────────────────────────────────────────────────────
   function updateFlightPhaseUI(phase) {
@@ -172,6 +302,10 @@
   function updateUI(obs) {
     currentObs = obs;
 
+    // Check movement mode from metadata
+    const meta = obs.metadata || {};
+    const is2d = meta.movement_mode === '2d';
+
     // Renderer
     const pos = obs.position || {};
     const vel = obs.velocity || {};
@@ -184,13 +318,17 @@
     renderer.updateNearby(obs.nearby_obstacles || []);
     renderer.updateWaypoint(obs.next_waypoint);
 
+    // Pass wind data to renderer for the wind indicator
+    const wind = meta.wind || { wx: 0, wy: 0, wz: 0 };
+    renderer.updateWind(wind);
+
     // Overlay HUD
-    overlayEpisode.textContent = `Episode: ${(obs.metadata?.episode_id || '—').slice(0, 8)}`;
-    overlayStep.textContent = `Step: ${obs.metadata?.step || 0} / ${(obs.metadata?.step || 0) + (obs.steps_remaining ?? 2000)}`;
-    overlayReward.textContent = `Reward: ${fmt(obs.metadata?.total_reward)}`;
+    overlayEpisode.textContent = `Episode: ${(meta.episode_id || '—').slice(0, 8)}`;
+    overlayStep.textContent = `Step: ${meta.step || 0} / ${(meta.step || 0) + (obs.steps_remaining ?? 2000)}`;
+    overlayReward.textContent = `Reward: ${fmt(meta.total_reward)}`;
     overlayDist.textContent = `Dist: ${fmt(obs.distance_to_target, 1)}m`;
-    overlayAlt.textContent = `Alt: ${fmt(pos.z, 1)}m`;
-    overlayPhase.textContent = `Phase: ${obs.flight_phase || 'GROUND'}`;
+    overlayAlt.textContent = is2d ? '' : `Alt: ${fmt(pos.z, 1)}m`;
+    overlayPhase.textContent = is2d ? 'Mode: 2D' : `Phase: ${obs.flight_phase || 'GROUND'}`;
 
     // Phase-colored overlay
     const phaseColorClass = {
@@ -200,10 +338,16 @@
       DESCENDING: 'phase-descending-color',
       LANDED: 'phase-landed-color',
     };
-    overlayPhase.className = 'overlay-phase ' + (phaseColorClass[obs.flight_phase] || '');
+    if (!is2d) {
+      overlayPhase.className = 'overlay-phase ' + (phaseColorClass[obs.flight_phase] || '');
+    } else {
+      overlayPhase.className = 'overlay-phase phase-ground-color';
+    }
 
-    // Flight phase bar
-    updateFlightPhaseUI(obs.flight_phase || 'GROUND');
+    // Flight phase bar (only in 3D)
+    if (!is2d) {
+      updateFlightPhaseUI(obs.flight_phase || 'GROUND');
+    }
 
     // Status overlay
     overlayStatus.classList.remove('show', 'delivered', 'collision', 'oob');
@@ -219,21 +363,27 @@
     }
 
     // Telemetry
-    telemPos.textContent = `${fmt(pos.x)}, ${fmt(pos.y)}, ${fmt(pos.z)}`;
-    telemVel.textContent = `${fmt(vel.vx)}, ${fmt(vel.vy)}, ${fmt(vel.vz)}`;
-    telemAccel.textContent = `${fmt(accel.vx)}, ${fmt(accel.vy)}, ${fmt(accel.vz)}`;
-    telemSpeed.textContent = `${fmt(obs.metadata?.speed)} m/s`;
-    telemAlt.textContent = `${fmt(pos.z, 1)} m`;
-    telemCruiseAlt.textContent = `${fmt(obs.cruise_altitude, 1)} m`;
+    if (is2d) {
+      telemPos.textContent = `${fmt(pos.x)}, ${fmt(pos.y)}`;
+      telemVel.textContent = `${fmt(vel.vx)}, ${fmt(vel.vy)}`;
+      telemAccel.textContent = `${fmt(accel.vx)}, ${fmt(accel.vy)}`;
+    } else {
+      telemPos.textContent = `${fmt(pos.x)}, ${fmt(pos.y)}, ${fmt(pos.z)}`;
+      telemVel.textContent = `${fmt(vel.vx)}, ${fmt(vel.vy)}, ${fmt(vel.vz)}`;
+      telemAccel.textContent = `${fmt(accel.vx)}, ${fmt(accel.vy)}, ${fmt(accel.vz)}`;
+    }
+    telemSpeed.textContent = `${fmt(meta.speed)} m/s`;
+    telemAlt.textContent = is2d ? 'N/A (2D)' : `${fmt(pos.z, 1)} m`;
+    telemCruiseAlt.textContent = is2d ? 'N/A (2D)' : `${fmt(obs.cruise_altitude, 1)} m`;
     const tp = obs.target_position || {};
-    telemTarget.textContent = `${fmt(tp.x)}, ${fmt(tp.y)}, ${fmt(tp.z)}`;
+    telemTarget.textContent = is2d ? `${fmt(tp.x)}, ${fmt(tp.y)}` : `${fmt(tp.x)}, ${fmt(tp.y)}, ${fmt(tp.z)}`;
     telemDist.textContent = `${fmt(obs.distance_to_target, 1)} m`;
-    telemHDist.textContent = `${fmt(obs.horizontal_distance_to_target, 1)} m`;
+    telemHDist.textContent = is2d ? 'N/A (2D)' : `${fmt(obs.horizontal_distance_to_target, 1)} m`;
     const td = obs.target_direction || [0,0,0];
-    telemDir.textContent = `${fmt(td[0])}, ${fmt(td[1])}, ${fmt(td[2])}`;
+    telemDir.textContent = is2d ? `${fmt(td[0])}, ${fmt(td[1])}` : `${fmt(td[0])}, ${fmt(td[1])}, ${fmt(td[2])}`;
     const wp = obs.next_waypoint;
-    telemWP.textContent = wp ? `${fmt(wp.x)}, ${fmt(wp.y)}, ${fmt(wp.z)}` : 'None';
-    telemPath.textContent = `${obs.path_length || 0} waypoints`;
+    telemWP.textContent = wp ? `${fmt(wp.x)}, ${fmt(wp.y)}, ${fmt(wp.z)}` : (is2d ? 'N/A (2D)' : 'None');
+    telemPath.textContent = is2d ? 'N/A (2D)' : `${obs.path_length || 0} waypoints`;
 
     // Flags
     flagDelivered.classList.toggle('active', !!obs.package_delivered);
@@ -242,12 +392,12 @@
     flagDone.classList.toggle('active', !!obs.done);
 
     // Flight phase text
-    telemFlightPhase.textContent = obs.flight_phase || '—';
+    telemFlightPhase.textContent = is2d ? 'N/A (2D)' : (obs.flight_phase || '—');
 
     telemStepReward.textContent = fmt(obs.reward);
-    telemTotalReward.textContent = fmt(obs.metadata?.total_reward);
+    telemTotalReward.textContent = fmt(meta.total_reward);
     telemStepsLeft.textContent = obs.steps_remaining;
-    telemObsCount.textContent = obs.metadata?.num_obstacles || '—';
+    telemObsCount.textContent = meta.num_obstacles || '—';
 
     // Nearby obstacles panel — show box dimensions instead of radius
     const nearby = obs.nearby_obstacles || [];
@@ -266,6 +416,34 @@
     rewardHistory.push(obs.reward || 0);
     if (rewardHistory.length > 200) rewardHistory.shift();
     drawRewardChart();
+
+    // Wind info display (visible for tasks with wind)
+    const windSpeed = Math.sqrt(
+      (wind.wx || 0) ** 2 + (wind.wy || 0) ** 2 + (wind.wz || 0) ** 2
+    );
+    if (windInfoCard) {
+      windInfoCard.style.display = windSpeed > 0.01 ? 'block' : 'none';
+    }
+    if (telemWindSpeed) {
+      telemWindSpeed.textContent = `${windSpeed.toFixed(1)} m/s²`;
+    }
+    if (telemWindDir) {
+      if (windSpeed < 0.01) {
+        telemWindDir.textContent = 'Calm';
+      } else {
+        const angle = Math.atan2(wind.wy || 0, wind.wx || 0) * 180 / Math.PI;
+        let dirStr = '';
+        if (angle >= -22.5 && angle < 22.5)   dirStr = 'Eastward →';
+        else if (angle >= 22.5 && angle < 67.5)    dirStr = 'SE ↘';
+        else if (angle >= 67.5 && angle < 112.5)   dirStr = 'Southward ↓';
+        else if (angle >= 112.5 && angle < 157.5)  dirStr = 'SW ↙';
+        else if (angle >= 157.5 || angle < -157.5) dirStr = 'Westward ←';
+        else if (angle >= -157.5 && angle < -112.5) dirStr = 'NW ↖';
+        else if (angle >= -112.5 && angle < -67.5) dirStr = 'Northward ↑';
+        else if (angle >= -67.5 && angle < -22.5)  dirStr = 'NE ↗';
+        telemWindDir.textContent = `${dirStr} (${fmt(wind.wx)}, ${fmt(wind.wy)})`;
+      }
+    }
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -320,25 +498,32 @@
   // ────────────────────────────────────────────────────────────────────────
   async function doReset() {
     try {
-      const seedVal = seedInput.value.trim();
-      const body = {
-        num_obstacles: parseInt(numObsInput.value) || 15,
-      };
-      if (seedVal !== '') body.seed = parseInt(seedVal);
+      const body = {};
 
-      // Send custom start / target positions
-      const sx = parseFloat(startX.value), sy = parseFloat(startY.value);
-      const ex = parseFloat(endX.value),   ey = parseFloat(endY.value);
-      if (!isNaN(sx) && !isNaN(sy)) body.start_position = { x: sx, y: sy };
-      if (!isNaN(ex) && !isNaN(ey)) body.target_position = { x: ex, y: ey };
+      // If a task is selected, use task-based reset
+      if (selectedTaskId) {
+        body.task_id = selectedTaskId;
+        toast(`🔄 Resetting with task: ${selectedTaskId}`, 'info');
+      } else {
+        // Legacy free-play mode
+        const seedVal = seedInput.value.trim();
+        body.num_obstacles = parseInt(numObsInput.value) || 15;
+        if (seedVal !== '') body.seed = parseInt(seedVal);
 
-      // Send custom obstacles if any
-      if (customObstacles.length > 0) {
-        body.obstacles = customObstacles.map(o => ({
-          x: o.x, y: o.y, height: o.height,
-          size_x: o.size_x || 2, size_y: o.size_y || 2,
-          obstacle_type: o.obstacle_type || 'building',
-        }));
+        // Send custom start / target positions
+        const sx = parseFloat(startX.value), sy = parseFloat(startY.value);
+        const ex = parseFloat(endX.value),   ey = parseFloat(endY.value);
+        if (!isNaN(sx) && !isNaN(sy)) body.start_position = { x: sx, y: sy };
+        if (!isNaN(ex) && !isNaN(ey)) body.target_position = { x: ex, y: ey };
+
+        // Send custom obstacles if any
+        if (customObstacles.length > 0) {
+          body.obstacles = customObstacles.map(o => ({
+            x: o.x, y: o.y, height: o.height,
+            size_x: o.size_x || 2, size_y: o.size_y || 2,
+            obstacle_type: o.obstacle_type || 'building',
+          }));
+        }
       }
 
       const obs = await api('POST', '/reset', body);
@@ -361,10 +546,18 @@
       overlayStatus.classList.remove('show', 'delivered', 'collision', 'oob');
 
       updateUI(obs);
-      const obsCount = customObstacles.length > 0
-        ? `${customObstacles.length} custom`
-        : `${body.num_obstacles} random`;
-      toast(`🔄 Reset – ${obsCount} obstacles, start (${sx||'~'},${sy||'~'}) → target (${ex||'~'},${ey||'~'})`, 'success');
+
+      if (selectedTaskId) {
+        const task = availableTasks.find(t => t.task_id === selectedTaskId);
+        const taskName = task ? task.name : selectedTaskId;
+        const mode = task?.movement_mode === '2d' ? '2D' : '3D';
+        toast(`✅ Task "${taskName}" (${mode}) loaded – ready to fly!`, 'success');
+      } else {
+        const obsCount = customObstacles.length > 0
+          ? `${customObstacles.length} custom`
+          : `${body.num_obstacles} random`;
+        toast(`🔄 Reset – ${obsCount} obstacles`, 'success');
+      }
     } catch (e) {
       toast(`Reset failed: ${e.message}`, 'error');
     }
@@ -375,7 +568,7 @@
       const body = {
         ax: parseFloat(axSlider.value) || 0,
         ay: parseFloat(aySlider.value) || 0,
-        az: parseFloat(azSlider.value) || 0,
+        az: currentMovementMode === '2d' ? 0 : (parseFloat(azSlider.value) || 0),
       };
       const obs = await api('POST', '/step', body);
 
@@ -417,6 +610,18 @@
         else if (obs.out_of_bounds) toast('⚠ Drone went out of bounds!', 'warn');
         else toast('⏱ Episode timed out.', 'warn');
       }
+
+      // Auto-grade when episode is done
+      if (obs.done && !isRunning) {
+        try {
+          const gradeResult = await api('GET', '/grade');
+          const score = gradeResult.score || 0;
+          const pct = (score * 100).toFixed(1);
+          toast(`📊 Grade: ${pct}% (${gradeResult.task_id || 'unknown'})`, score >= 0.5 ? 'success' : 'warn', 5000);
+        } catch (e) {
+          console.warn('Could not auto-grade:', e);
+        }
+      }
     } catch (e) {
       toast(`Step failed: ${e.message}`, 'error');
       if (isRunning) stopAutoRun();
@@ -442,6 +647,20 @@
     btnStop.disabled = true;
     btnReset.disabled = false;
     toast('⏹ Auto-run stopped', 'info');
+
+    // Auto-grade after stopping if episode is done
+    if (currentObs && currentObs.done) {
+      (async () => {
+        try {
+          const gradeResult = await api('GET', '/grade');
+          const score = gradeResult.score || 0;
+          const pct = (score * 100).toFixed(1);
+          toast(`📊 Final Grade: ${pct}% — ${gradeResult.task_id || 'unknown'}`, score >= 0.5 ? 'success' : 'warn', 5000);
+        } catch (e) {
+          console.warn('Could not auto-grade:', e);
+        }
+      })();
+    }
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -545,7 +764,7 @@
   // ────────────────────────────────────────────────────────────────────────
   function setupKeyboard() {
     document.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT') return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
       switch (e.key) {
         case 'r': doReset(); break;
         case ' ':
@@ -556,12 +775,16 @@
         case 'a': startAutoRun(); break;
         case 's': stopAutoRun(); break;
         case 'ArrowUp':
-          azSlider.value = Math.min(5, parseFloat(azSlider.value) + 0.5);
-          azVal.textContent = parseFloat(azSlider.value).toFixed(1);
+          if (currentMovementMode !== '2d') {
+            azSlider.value = Math.min(5, parseFloat(azSlider.value) + 0.5);
+            azVal.textContent = parseFloat(azSlider.value).toFixed(1);
+          }
           break;
         case 'ArrowDown':
-          azSlider.value = Math.max(-5, parseFloat(azSlider.value) - 0.5);
-          azVal.textContent = parseFloat(azSlider.value).toFixed(1);
+          if (currentMovementMode !== '2d') {
+            azSlider.value = Math.max(-5, parseFloat(azSlider.value) - 0.5);
+            azVal.textContent = parseFloat(azSlider.value).toFixed(1);
+          }
           break;
         case 'ArrowRight':
           axSlider.value = Math.min(5, parseFloat(axSlider.value) + 0.5);
@@ -610,16 +833,25 @@
     btnAuto.addEventListener('click', startAutoRun);
     btnStop.addEventListener('click', stopAutoRun);
 
+    // Task selector
+    taskSelect.addEventListener('change', () => {
+      onTaskSelected(taskSelect.value);
+    });
+
     // Initial connection check
     checkConnection();
     setInterval(checkConnection, 5000);
 
+    // Fetch tasks
+    fetchTasks();
+
     // API URL change
     apiUrlInput.addEventListener('change', () => {
       checkConnection();
+      fetchTasks();
     });
 
-    toast('🚁 Drone Delivery Simulator v2.0 ready – use sliders or arrow keys to control', 'info', 5000);
+    toast('🚁 Drone Delivery Simulator v3.0 ready – select a task and press Reset to start!', 'info', 5000);
   }
 
   // Boot

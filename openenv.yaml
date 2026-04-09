@@ -1,8 +1,9 @@
 name: package-drone-delivery
-version: "2.0.0"
+version: "3.0.0"
 description: >
   A complete OpenEnv environment where an AI agent controls a delivery drone
-  in a 3-D physics-based simulation. The drone must navigate from a start
+  in a physics-based simulation. Supports both 2D (ground-level) and 3D
+  (full flight phase) movement modes. The drone must navigate from a start
   position to a delivery target while avoiding AABB obstacles, managing
   flight phases (GROUND → LIFTING → CRUISING → DESCENDING → LANDED), and
   optimising for delivery success, efficiency, and smooth landing under
@@ -24,54 +25,61 @@ environment:
   spec_version: "1.0"
 
 tasks:
-  - id: direct_flight
+  - id: task_1_easy
     difficulty: easy
     max_steps: 500
     world_size: 100.0
     num_obstacles: 0
     delivery_radius: 5.0
+    movement_mode: 2d
     target_score: [0.7, 1.0]
     graders: [episode_score]
     description: >
-      Move directly towards the target along the ground.
-      No obstacles, no liftoff required. Tests basic navigation.
+      Move directly towards the target on the 2D ground plane (X-Y only).
+      No obstacles, no liftoff required. Tests basic 2D navigation.
 
-  - id: vertical_mission
+  - id: task_2_medium
     difficulty: medium
     max_steps: 1000
     world_size: 200.0
     num_obstacles: 0
     delivery_radius: 3.0
+    movement_mode: 3d
     target_score: [0.4, 0.7]
     graders: [episode_score]
     description: >
       Lift off from the ground, cruise at altitude towards the target,
-      descend and land. No obstacles. Tests full flight phase control.
+      descend and land. Full 3D movement. No obstacles.
+      Tests full flight phase control.
 
-  - id: obstacle_course
+  - id: task_3_hard
     difficulty: hard
     max_steps: 1500
     world_size: 200.0
     num_obstacles: 12
     delivery_radius: 2.0
+    movement_mode: 3d
     target_score: [0.25, 0.5]
     graders: [episode_score]
     description: >
       Take off, navigate through dense obstacles (buildings, towers),
-      and land at the target. Tests pathfinding and obstacle avoidance.
+      and land at the target. Full 3D movement.
+      Tests pathfinding and obstacle avoidance.
 
-  - id: storm_run
+  - id: task_4_expert
     difficulty: expert
     max_steps: 1500
     world_size: 200.0
     num_obstacles: 15
     delivery_radius: 1.5
+    movement_mode: 3d
     wind: [2.0, 0.0, 0.0]
     target_score: [0.1, 0.35]
     graders: [episode_score]
     description: >
       Navigate through dense obstacles with constant wind (2 m/s^2 eastward)
-      pushing the drone off course. Tests wind compensation and precision.
+      pushing the drone off course. Full 3D movement.
+      Tests wind compensation and precision.
 
 graders:
   - id: episode_score
@@ -82,6 +90,7 @@ graders:
     description: >
       Uses the environment's /grade endpoint and reads the "score" field.
       The implementation clamps score strictly within (0, 1).
+      Grading is performed by task-specific subclasses of BaseGrader.
 
 
 api:
@@ -99,6 +108,9 @@ api:
     - path: /tasks
       method: GET
       description: List all grading tasks with difficulty levels
+    - path: /tasks/{task_id}
+      method: GET
+      description: Return full task definition JSON for a single task
     - path: /grade
       method: GET
       description: Return grader score after episode completion
@@ -136,7 +148,7 @@ observation_space:
     flight_phase:
       type: string
       enum: [GROUND, LIFTING, CRUISING, DESCENDING, LANDED]
-      description: "Current flight phase of the drone"
+      description: "Current flight phase of the drone (3D mode only)"
     cruise_altitude:
       type: float
       description: "Dynamic cruise altitude computed from obstacle heights (m)"
@@ -198,7 +210,7 @@ action_space:
     az:
       type: float
       range: [-5.0, 5.0]
-      description: "Acceleration along Z axis (m/s²)"
+      description: "Acceleration along Z axis (m/s²) — forced to 0 in 2D mode"
 
 reward:
   type: dict
@@ -255,6 +267,7 @@ grading:
   description: >
     Weighted combination of delivery success, distance progress,
     step efficiency, collision avoidance, and landing smoothness.
+    Each task has its own weight distribution via BaseGrader subclasses.
 
 physics:
   timestep_s: 0.1

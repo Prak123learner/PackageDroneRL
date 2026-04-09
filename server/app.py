@@ -53,7 +53,10 @@ from pydantic import BaseModel
 
 from environment import DroneDeliveryEnvironment
 from models import DroneAction, DroneObservation, Position, ObstacleConfig
-from grader import TASKS, list_tasks, grade_episode, TaskDefinition
+from grader import (
+    TASKS, TASK_CONFIGS, list_tasks, grade_episode,
+    TaskDefinition, get_task_json, BaseGrader,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  App setup
@@ -66,9 +69,10 @@ app = FastAPI(
         "navigates from a start location to a delivery target while avoiding "
         "obstacles.  Features flight phases (GROUND → LIFTING → CRUISING → "
         "DESCENDING → LANDED), AABB box obstacles, and a 200m world.  "
+        "Supports 2D and 3D movement modes across 4 difficulty tiers.  "
         "Compatible with the openenv protocol."
     ),
-    version="2.0.0",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -89,13 +93,9 @@ _DEFAULT_SESSION = "default"
 _sessions: Dict[str, DroneDeliveryEnvironment] = {}
 
 
-def _get_env(session_id: str) -> DroneDeliveryEnvironment:
+def _get_env(session_id: str, task_id: str = "task_1_easy") -> DroneDeliveryEnvironment:
     if session_id not in _sessions:
-        _sessions[session_id] = DroneDeliveryEnvironment(
-            world_size=float(os.getenv("WORLD_SIZE", "200")),
-            num_obstacles=int(os.getenv("NUM_OBSTACLES", "15")),
-            seed=None,
-        )
+        _sessions[session_id] = DroneDeliveryEnvironment(task_id=task_id)
     return _sessions[session_id]
 
 
@@ -161,6 +161,7 @@ async def info():
         "min_cruise_alt_m": env.MIN_CRUISE_ALT,
         "horizontal_close_m": env.HORIZONTAL_CLOSE,
         "obstacle_model": "AABB (axis-aligned bounding box, 2x2 footprint)",
+        "available_tasks": list(TASK_CONFIGS.keys()),
         "observation_space": {
             "position": "3-D float (x, y, z)",
             "velocity": "3-D float (vx, vy, vz)",
@@ -181,7 +182,7 @@ async def info():
         "action_space": {
             "ax": f"float in [-{env.MAX_ACCEL}, {env.MAX_ACCEL}]",
             "ay": f"float in [-{env.MAX_ACCEL}, {env.MAX_ACCEL}]",
-            "az": f"float in [-{env.MAX_ACCEL}, {env.MAX_ACCEL}]",
+            "az": f"float in [-{env.MAX_ACCEL}, {env.MAX_ACCEL}] (forced to 0 in 2D mode)",
             "note": "Full manual control — agent directly controls drone acceleration",
         },
         "reward_structure": {
@@ -194,6 +195,7 @@ async def info():
             "near_miss_bonus": env.NEAR_MISS_BONUS,
         },
         "reset_options": {
+            "task_id": f"str — one of {list(TASK_CONFIGS.keys())}",
             "world_size": "float — world dimensions in metres",
             "num_obstacles": "int — number of random obstacles",
             "seed": "int — RNG seed for reproducibility",
@@ -214,28 +216,33 @@ async def reset(
 
     Optionally override ``world_size``, ``num_obstacles``, ``seed``,
     ``start_position``, ``target_position``, or provide custom ``obstacles``.
+    Pass ``task_id`` to use a predefined task configuration.
     """
+    # ── Task-based reset (primary path) ──
+    if body.task_id:
+        if body.task_id not in TASK_CONFIGS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown task_id '{body.task_id}'. Available: {list(TASK_CONFIGS.keys())}",
+            )
+        # Create a fresh environment for this task
+        _sessions[session_id] = DroneDeliveryEnvironment(task_id=body.task_id)
+        env = _sessions[session_id]
+        task = TASKS[body.task_id]
+        obs = env.reset_from_task(task)
+        return JSONResponse(_obs_to_dict(obs))
+
+    # ── Legacy / free-play reset ──
     if body.world_size is not None or body.num_obstacles is not None or body.seed is not None:
         # Create / replace session with custom settings
         _sessions[session_id] = DroneDeliveryEnvironment(
+            task_id="task_1_easy",
             world_size=body.world_size or DroneDeliveryEnvironment.WORLD_SIZE,
             num_obstacles=body.num_obstacles or 15,
             seed=body.seed,
         )
 
     env = _get_env(session_id)
-
-    # If a task_id is provided, use it to configure everything
-    if body.task_id:
-        if body.task_id not in TASKS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown task_id '{body.task_id}'. Available: {list(TASKS.keys())}",
-            )
-        task = TASKS[body.task_id]
-        obs = env.reset_from_task(task)
-        # Fetch obstacles for response
-        return JSONResponse(_obs_to_dict(obs))
 
     # Build optional kwargs for reset()
     reset_kwargs: Dict[str, Any] = {}
@@ -275,6 +282,7 @@ async def step(
     Send acceleration commands ``(ax, ay, az)`` in m/s².
     Values are internally clamped to ``[-MAX_ACCEL, MAX_ACCEL]``.
     The agent has full manual control over the drone's acceleration.
+    In 2D mode (task_1_easy), az is forced to 0.
 
     Returns a full ``DroneObservation`` including:
     * current position & velocity & acceleration
@@ -317,6 +325,8 @@ async def get_state(
     return {
         "episode_id": s.episode_id,
         "step_count": s.step_count,
+        "task_id": inner._task_id,
+        "movement_mode": "2d" if inner.is_2d else "3d",
         "drone_position": inner._pos.model_dump(),
         "drone_velocity": inner._vel.model_dump(),
         "drone_acceleration": inner._accel.model_dump(),
@@ -456,8 +466,24 @@ async def get_obstacles(
 
 @app.get("/tasks", tags=["Grading"])
 async def get_tasks():
-    """List all available grading tasks with difficulty levels."""
+    """List all available grading tasks with difficulty levels and full config."""
     return {"tasks": list_tasks()}
+
+
+@app.get("/tasks/{task_id}", tags=["Grading"])
+async def get_task_detail(task_id: str):
+    """
+    Return full task definition JSON for a single task.
+
+    Includes action_schema, observation_space, grader weights, and
+    success_criteria in the standardised format.
+    """
+    if task_id not in TASK_CONFIGS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown task_id '{task_id}'. Available: {list(TASK_CONFIGS.keys())}",
+        )
+    return get_task_json(task_id)
 
 
 @app.get("/grade", tags=["Grading"])
@@ -469,6 +495,7 @@ async def grade(
 
     Returns a score in [0.0, 1.0] with component breakdown.
     Must be called after the episode is done.
+    Also saves a JSON result to the Tasks/ directory.
     """
     if session_id not in _sessions:
         raise HTTPException(status_code=400, detail="Session not found.")

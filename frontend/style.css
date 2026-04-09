@@ -972,3 +972,56 @@ kbd {
   font-size: 0.75rem;
   color: var(--cyan);
 }
+
+/* ── Wind conditions card ──────────────────────────────────────────────── */
+.wind-display {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.wind-speed-gauge,
+.wind-direction-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.06);
+  border: 1px solid rgba(245, 158, 11, 0.15);
+}
+.wind-gauge-label {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.wind-gauge-value {
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--amber);
+}
+.wind-hint {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.04);
+  border-left: 2px solid rgba(245, 158, 11, 0.25);
+}
+
+#wind-info-card .card-header {
+  color: var(--amber);
+}
+#wind-info-card .card-header h2 {
+  color: var(--amber);
+}
+#wind-info-card {
+  border-color: rgba(245, 158, 11, 0.15);
+}
+#wind-info-card:hover {
+  border-color: rgba(245, 158, 11, 0.3);
+}

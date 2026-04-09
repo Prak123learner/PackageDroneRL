@@ -1,16 +1,16 @@
 """
 Inference Script – Drone Delivery RL Environment
 ===================================================
-An LLM agent controls a 3D delivery drone through flight phases
+An LLM agent controls a delivery drone through flight phases
 (GROUND → LIFTING → CRUISING → DESCENDING → LANDED) by choosing
 acceleration commands (ax, ay, az) each step.
 
 TASKS (4 difficulty tiers)
 --------------------------
-    1. direct_flight    (Easy)   – Ground-level direct movement, no obstacles
-    2. vertical_mission (Medium) – Full flight phases, takeoff → cruise → land
-    3. obstacle_course  (Hard)   – Dense obstacles, requires pathfinding + avoidance
-    4. storm_run        (Expert) – Obstacles + constant wind (2 m/s² eastward)
+    1. task_1_easy   – 2D ground-level direct movement, no obstacles
+    2. task_2_medium – 3D full flight phases, takeoff → cruise → land
+    3. task_3_hard   – 3D dense obstacles, requires pathfinding + avoidance
+    4. task_4_expert – 3D obstacles + constant wind (2 m/s² eastward)
 
 STANDALONE: This script only requires `requests` and `openai` — no
 openenv-core or other project files needed.
@@ -25,8 +25,8 @@ OPTIONAL ENV VARS
                        Defaults to http://localhost:7860 (HF Spaces port).
     API_BASE_URL       LLM API endpoint (default: HF router).
     MODEL_NAME         Model identifier (default: Qwen/Qwen2.5-72B-Instruct).
-    DRONE_TASK_ID      Task to run: direct_flight | vertical_mission |
-                       obstacle_course | storm_run  (default: none / free play).
+    DRONE_TASK_ID      Task to run: task_1_easy | task_2_medium |
+                       task_3_hard | task_4_expert  (default: none / LLM chooses).
 
 STDOUT FORMAT
 -------------
@@ -65,23 +65,23 @@ MAX_TOKENS = 200
 HTTP_TIMEOUT = 30           # seconds per HTTP request to the environment
 
 # ── Task configs (mirrors environment tasks) ───────────────────────────────────
-TASKS = ["direct_flight", "vertical_mission", "obstacle_course", "storm_run"]
+TASKS = ["task_1_easy", "task_2_medium", "task_3_hard", "task_4_expert"]
 
 TASK_DESCRIPTIONS = {
-    "direct_flight": (
-        "Easy: ground-level direct flight, no obstacles. "
+    "task_1_easy": (
+        "Easy: 2D ground-level direct flight (XY plane only), no obstacles. "
         "Reach target area and deliver with minimal steps."
     ),
-    "vertical_mission": (
-        "Medium: full flight phases (takeoff → cruise → descend → land), no obstacles. "
+    "task_2_medium": (
+        "Medium: 3D full flight phases (takeoff → cruise → descend → land), no obstacles. "
         "Maintain altitude control and land smoothly."
     ),
-    "obstacle_course": (
-        "Hard: dense AABB obstacles. "
+    "task_3_hard": (
+        "Hard: 3D dense AABB obstacles. "
         "Avoid collisions while navigating to target and landing within delivery radius."
     ),
-    "storm_run": (
-        "Expert: dense obstacles + constant eastward wind acceleration. "
+    "task_4_expert": (
+        "Expert: 3D dense obstacles + constant eastward wind acceleration. "
         "Compensate for drift while avoiding collisions and landing precisely."
     ),
 }
@@ -96,17 +96,17 @@ SUCCESS_SCORE_THRESHOLD = 0.3   # score >= 0.3 -> success (drone made significan
 # ──────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = textwrap.dedent("""\
-You are an AI pilot controlling a delivery drone in a 3D physics simulation.
+You are an AI pilot controlling a delivery drone in a physics simulation.
 
 OBJECTIVE: Fly from the start position to the delivery target, land, and deliver the package.
 
 TASKS (escalating difficulty):
-  1. EASY  (direct_flight)    - Move directly to the target along the ground. No liftoff needed.
-  2. MEDIUM (vertical_mission) - Take off, cruise at altitude, descend and land. No obstacles.
-  3. HARD  (obstacle_course)  - Full flight through dense obstacles. Requires pathfinding.
-  4. EXPERT (storm_run)       - Obstacles + constant wind (2 m/s^2) pushing you off course.
+  1. EASY   (task_1_easy)   - 2D only: Move directly to the target on the XY ground plane. az=0 always.
+  2. MEDIUM (task_2_medium) - 3D: Take off, cruise at altitude, descend and land. No obstacles.
+  3. HARD   (task_3_hard)   - 3D: Full flight through dense obstacles. Requires pathfinding.
+  4. EXPERT (task_4_expert) - 3D: Obstacles + constant wind (2 m/s^2) pushing you off course.
 
-FLIGHT PHASES (automatic transitions based on altitude/position):
+FLIGHT PHASES (3D mode, automatic transitions based on altitude/position):
   GROUND     - You start here. Thrust upward (az > 0) to lift off.
   LIFTING    - Keep climbing until you reach cruise altitude.
   CRUISING   - Fly horizontally toward the target. Follow A* waypoints if available.
@@ -134,7 +134,7 @@ OUTPUT FORMAT: Reply with ONLY a JSON object, nothing else:
 {"ax": <float>, "ay": <float>, "az": <float>}
 
 STRATEGY HINTS:
-  - EASY: Just steer toward the target with ax/ay, keep az=0 (stay on ground)
+  - EASY (2D): Just steer toward the target with ax/ay, keep az=0
   - GROUND: set az=5.0 to lift off quickly
   - LIFTING: keep az=3.0-4.0, gently steer toward target with small ax/ay
   - CRUISING: use target_direction or waypoint to set ax/ay (scale 3-4), hold altitude with az
@@ -271,9 +271,11 @@ def format_observation(obs: Dict, step: int, last_reward: float) -> str:
     td = obs.get("target_direction", [0.0, 0.0, 0.0])
     tp = obs.get("target_position", {})
     meta = obs.get("metadata", {})
+    movement_mode = meta.get("movement_mode", "3d")
 
     lines = [
         f"Step: {step} / {obs.get('steps_remaining', 0) + step}",
+        f"Movement Mode: {movement_mode.upper()}",
         f"Flight Phase: {obs.get('flight_phase', 'GROUND')}",
         f"Position: x={pos.get('x', 0):.1f}, y={pos.get('y', 0):.1f}, z={pos.get('z', 0):.1f}",
         f"Velocity: vx={vel.get('vx', 0):.1f}, vy={vel.get('vy', 0):.1f}, vz={vel.get('vz', 0):.1f}",
@@ -281,12 +283,15 @@ def format_observation(obs: Dict, step: int, last_reward: float) -> str:
         f"Target: x={tp.get('x', 0):.1f}, y={tp.get('y', 0):.1f}, z={tp.get('z', 0):.1f}",
         f"Target Direction (unit vec): [{td[0]:.3f}, {td[1]:.3f}, {td[2]:.3f}]",
         f"Distance to Target: {obs.get('distance_to_target', 0):.1f} m",
-        f"Horizontal Distance: {obs.get('horizontal_distance_to_target', 0):.1f} m",
-        f"Cruise Altitude: {obs.get('cruise_altitude', 15):.1f} m",
-        f"Last Reward: {last_reward:.2f}",
     ]
 
-    # Waypoint hint
+    if movement_mode == "3d":
+        lines.append(f"Horizontal Distance: {obs.get('horizontal_distance_to_target', 0):.1f} m")
+        lines.append(f"Cruise Altitude: {obs.get('cruise_altitude', 15):.1f} m")
+
+    lines.append(f"Last Reward: {last_reward:.2f}")
+
+    # Waypoint hint (3D only)
     wp = obs.get("next_waypoint")
     if wp:
         lines.append(
@@ -320,7 +325,10 @@ def format_observation(obs: Dict, step: int, last_reward: float) -> str:
     if wx != 0 or wy != 0 or wz != 0:
         lines.append(f"Wind: wx={wx:.1f}, wy={wy:.1f}, wz={wz:.1f} m/s^2")
 
-    lines.append('Decide your acceleration. Reply with ONLY: {"ax": <float>, "ay": <float>, "az": <float>}')
+    if movement_mode == "2d":
+        lines.append('Decide your acceleration (2D only). Reply with ONLY: {"ax": <float>, "ay": <float>, "az": 0}')
+    else:
+        lines.append('Decide your acceleration. Reply with ONLY: {"ax": <float>, "ay": <float>, "az": <float>}')
     return "\n".join(lines)
 
 
@@ -445,6 +453,12 @@ def get_llm_action(
         # Fallback: use simple heuristic based on phase
         phase = obs.get("flight_phase", "GROUND")
         td = obs.get("target_direction", [0.0, 0.0, 0.0])
+        movement_mode = obs.get("metadata", {}).get("movement_mode", "3d")
+
+        if movement_mode == "2d":
+            # 2D mode: just steer toward target
+            return td[0] * 3.5, td[1] * 3.5, 0.0, "fallback-2d"
+
         if phase == "GROUND":
             return 0.0, 0.0, 5.0, '{"ax":0,"ay":0,"az":5}'
         elif phase == "LIFTING":

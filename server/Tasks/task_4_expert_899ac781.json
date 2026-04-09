@@ -1,0 +1,83 @@
+{
+  "task_id": "task_4_expert",
+  "name": "Storm Run",
+  "description": "Navigate through dense obstacles with constant wind (2 m/s\u00b2 eastward) pushing the drone off course. Full 3D movement. Tests wind compensation, optimal pathing under perturbation, precision.",
+  "difficulty": "expert",
+  "max_steps": 1500,
+  "world_size": 200.0,
+  "start": [
+    10,
+    10
+  ],
+  "target": [
+    185,
+    185
+  ],
+  "num_obstacles": 15,
+  "delivery_radius": 1.5,
+  "movement_mode": "3d",
+  "wind": [
+    2.0,
+    0.0,
+    0.0
+  ],
+  "seed": 4004,
+  "target_score_min": 0.1,
+  "target_score_max": 0.35,
+  "action_schema": {
+    "ax": "float \u2014 acceleration along X axis (m/s\u00b2), range [-5.0, 5.0]",
+    "ay": "float \u2014 acceleration along Y axis (m/s\u00b2), range [-5.0, 5.0]",
+    "az": "float \u2014 acceleration along Z axis (m/s\u00b2), range [-5.0, 5.0]"
+  },
+  "observation_space": {
+    "position": "dict \u2014 {x, y, z} current drone position in metres",
+    "velocity": "dict \u2014 {vx, vy, vz} current drone velocity in m/s",
+    "target_position": "dict \u2014 {x, y, z} delivery target position",
+    "distance_to_target": "float \u2014 Euclidean distance to target (m)",
+    "target_direction": "list \u2014 unit vector [3] pointing towards target",
+    "nearby_obstacles": "list \u2014 obstacles within 25m sensor range",
+    "done": "bool \u2014 whether the episode has ended",
+    "reward": "float \u2014 per-step reward signal",
+    "steps_remaining": "int \u2014 steps until episode timeout",
+    "flight_phase": "string \u2014 GROUND | LIFTING | CRUISING | DESCENDING | LANDED",
+    "cruise_altitude": "float \u2014 dynamic cruise altitude (m)",
+    "horizontal_distance_to_target": "float \u2014 XY-plane distance (m)",
+    "next_waypoint": "dict \u2014 next A* waypoint or null",
+    "path_length": "int \u2014 remaining waypoints on A* path"
+  },
+  "grader": {
+    "delivery_weight": 0.3,
+    "progress_weight": 0.3,
+    "efficiency_weight": 0.05,
+    "safety_weight": 0.3,
+    "smoothness_weight": 0.05,
+    "description": "Scores delivery success, distance progress, step efficiency, collision avoidance (safety), and landing smoothness"
+  },
+  "success_criteria": [
+    "Navigate through 15 obstacles under constant 2 m/s\u00b2 eastward wind",
+    "Compensate for wind drift to land within 1.5 metres of target",
+    "Avoid all collisions and out-of-bounds",
+    "Complete within 1500 steps"
+  ],
+  "episode_id": "899ac781-e9e1-4f39-b774-db47a61b9e1c",
+  "episode_result": {
+    "delivered": false,
+    "collision": false,
+    "out_of_bounds": true,
+    "timed_out": false,
+    "final_dist": 113.7246,
+    "initial_dist": 247.4874,
+    "steps_used": 253,
+    "max_steps": 1500,
+    "total_reward": 139.9197,
+    "landing_speed": 0.0,
+    "score": 0.2221,
+    "components": {
+      "delivery": 0.0,
+      "progress": 0.5405,
+      "efficiency": 0.0,
+      "safety": 0.2,
+      "smoothness": 0.0
+    }
+  }
+}
