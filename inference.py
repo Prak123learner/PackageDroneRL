@@ -52,7 +52,7 @@ load_dotenv()
 #  Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-ENV_URL = os.getenv("ENV_URL", "https://prototype05-droneenv2.hf.space")
+ENV_URL = os.getenv("ENV_URL", "https://prototype05-droneenv.hf.space")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
