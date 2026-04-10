@@ -52,17 +52,17 @@ load_dotenv()
 #  Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-ENV_URL = os.getenv("ENV_URL", "https://prototype05-droneenv.hf.space")
+ENV_URL = os.getenv("ENV_URL", "https://prototype05-droneenv2.hf.space")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 
-TASK_NAME = os.getenv("DRONE_TASK", "package-delivery")
 BENCHMARK = os.getenv("DRONE_BENCHMARK", "drone_delivery_rl")
 MAX_STEPS = int(os.getenv("DRONE_MAX_STEPS", "500"))
 TEMPERATURE = 0.3           # lower = more deterministic flight decisions
 MAX_TOKENS = 200
 HTTP_TIMEOUT = 30           # seconds per HTTP request to the environment
+DRONE_TASK_ID = os.getenv("DRONE_TASK_ID", "").strip()
 
 # ── Task configs (mirrors environment tasks) ───────────────────────────────────
 TASKS = ["task_1_easy", "task_2_medium", "task_3_hard", "task_4_expert"]
@@ -416,6 +416,26 @@ def choose_task_id(client: OpenAI) -> str:
     return _parse_task_id(text)
 
 
+def resolve_tasks_to_run(llm_client: OpenAI) -> List[str]:
+    """
+    Resolve which tasks inference should execute.
+    - If DRONE_TASK_ID is a valid task id, run only that task.
+    - If DRONE_TASK_ID=all (or unset), run all tasks sequentially.
+    - Otherwise, fallback to one LLM-selected task to remain robust.
+    """
+    if DRONE_TASK_ID:
+        if DRONE_TASK_ID.lower() == "all":
+            return TASKS
+        if DRONE_TASK_ID in TASKS:
+            return [DRONE_TASK_ID]
+        print(
+            f"[DEBUG] Invalid DRONE_TASK_ID='{DRONE_TASK_ID}'. Falling back to LLM task selection.",
+            flush=True,
+        )
+        return [choose_task_id(llm_client)]
+    return TASKS
+
+
 def get_llm_action(
     client: OpenAI,
     obs: Dict,
@@ -495,7 +515,8 @@ def main() -> None:
         score = 0.0
         success = False
 
-        log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+        # IMPORTANT: task must match openenv task IDs exactly for validator scraping.
+        log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
         try:
             if task_id:
@@ -560,8 +581,8 @@ def main() -> None:
             log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     try:
-        chosen_task_id = choose_task_id(llm_client)
-        run_episode(chosen_task_id)
+        for task_id in resolve_tasks_to_run(llm_client):
+            run_episode(task_id)
     finally:
         env.close()
 
